@@ -91,7 +91,7 @@ Se você rodar múltiplos nós e modificar os mesmos dados em diferentes nós, o
 * Modifique o valor da chave em um nó.
 * O sistema irá reconciliar automaticamente os valores entre os nós usando Vector Clocks.
 
-### Estrutura do Código
+### 6. Estrutura do Código
 * **main.go**: Arquivo principal que inicia os nós e permite a interação via console.
 * **internal/store**:
     * **kvstore.go**: Implementação principal do KV-Store, incluindo persistência e lógica de reconciliação de dados.
