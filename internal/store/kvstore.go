@@ -1,8 +1,7 @@
 package store
 
 import (
-	"encoding/json"
-	"fmt"
+	"log"
 	"os"
 	"sync"
 	"time"
@@ -10,185 +9,280 @@ import (
 	"github.com/bquerino/kv-g/internal/vectorclock"
 )
 
-type KVStore struct {
-	store        map[string]string                  // Armazena chave-valor
-	vectorClocks map[string]vectorclock.VectorClock // Armazena Vector Clocks para cada chave
-	pageIdx      int                                // Índice da página atual para persistência
-	mu           sync.RWMutex
-	nodeID       string      // Identificador do nó (ex: "node1")
-	ring         *HashRing   // Anel de hash consistente
-	replicas     int         // Número de réplicas
-	gossipNode   *GossipNode // Nó de comunicação Gossip
-	dataFile     string      // Caminho para o arquivo de persistência
+const PageSize = 4096 // Tamanho fixo da página (4KB)
+
+type DataItem struct {
+	Value       string
+	VectorClock *vectorclock.VectorClock // Versão do dado
 }
 
-// NewKVStore cria um novo KV-Store associado a um nó específico
-func NewKVStore(nodeID string, ring *HashRing, replicas int, gossipNode *GossipNode) *KVStore {
-	kv := &KVStore{
-		store:        make(map[string]string),
-		vectorClocks: make(map[string]vectorclock.VectorClock),
-		nodeID:       nodeID,
-		ring:         ring,
-		replicas:     replicas,
-		gossipNode:   gossipNode,
-		dataFile:     fmt.Sprintf("%s_data.json", nodeID), // Arquivo de persistência associado ao nó
-	}
-
-	// Carrega os dados do arquivo na inicialização
-	kv.LoadFromDisk()
-	return kv
+type Hint struct {
+	Key       string
+	Value     string
+	TargetID  string // O nó que deveria receber o dado originalmente
+	Timestamp time.Time
 }
 
-// Set adiciona ou atualiza uma chave-valor no KV-Store e salva no disco
-func (kv *KVStore) Set(key, value string) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-
-	fmt.Printf("Definindo chave '%s' com valor '%s' no KV-Store do nó '%s'.\n", key, value, kv.nodeID)
-
-	// Atualiza o vector clock
-	if _, exists := kv.vectorClocks[key]; !exists {
-		kv.vectorClocks[key] = vectorclock.VectorClock{}
-		fmt.Printf("Criando novo Vector Clock para a chave '%s' no nó '%s'.\n", key, kv.nodeID)
-	}
-	kv.vectorClocks[key].Update(kv.nodeID)
-	fmt.Printf("Vector Clock atualizado para a chave '%s': %v\n", key, kv.vectorClocks[key])
-
-	kv.store[key] = value
-
-	// Chamar a função para persistir no disco
-	kv.saveToDiskInternal()
-	fmt.Println("Dados salvos com sucesso.")
+// KeyValueStore gerencia os dados e lida com escrita em disco, reconciliação, e hinted handoff
+type KeyValueStore struct {
+	Data            map[string]*DataItem // Armazena os dados na memória
+	HintedData      map[string]*Hint     // Armazena dados para hinted handoff
+	PageManager     *PageManager         // Gerenciamento de páginas para escrita em disco
+	Gossip          *Gossip              // Integração com o protocolo Gossip
+	ConsistentHash  *ConsistentHashing   // Integração com Consistent Hashing
+	Mutex           sync.Mutex
+	HandoffInterval time.Duration // Intervalo para verificar hinted handoff
 }
 
-// Get recupera o valor associado a uma chave do KV-Store
-func (kv *KVStore) Get(key string) (string, bool) {
-	kv.mu.RLock()
-	defer kv.mu.RUnlock()
-
-	value, exists := kv.store[key]
-	return value, exists
+// Page gerencia a estrutura de uma página no disco
+type Page struct {
+	ID     int64  // Identificador único da página
+	Buffer []byte // Buffer de dados da página
+	Used   int    // Bytes atualmente usados na página
 }
 
-// Reconcile faz a reconciliação de uma chave entre nós
-func (kv *KVStore) Reconcile(key, incomingValue string, incomingVC vectorclock.VectorClock, incomingNodeID string, incomingTimestamp time.Time) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-
-	existingValue, exists := kv.store[key]
-	existingVC, vcExists := kv.vectorClocks[key]
-
-	// Se não houver valor local, adicione o valor recebido diretamente
-	if !exists || !vcExists {
-		kv.store[key] = incomingValue
-		kv.vectorClocks[key] = incomingVC
-		kv.SaveToDisk() // Persistir no disco
-		fmt.Printf("Chave %s inserida via Gossip no nó %s\n", key, kv.nodeID)
-		return
-	}
-
-	// Comparar Vector Clocks para decidir qual valor manter
-	comparison := existingVC.Compare(incomingVC)
-
-	switch comparison {
-	case 1:
-		// Local é mais recente, mantendo o valor atual
-		fmt.Println("Local é mais recente, mantendo o valor atual.")
-	case -1:
-		// Valor recebido é mais recente, substitui o valor local
-		kv.store[key] = incomingValue
-		kv.vectorClocks[key] = incomingVC
-		kv.SaveToDisk() // Persistir no disco
-		fmt.Printf("Chave %s atualizada via Gossip no nó %s\n", key, kv.nodeID)
-	case 0:
-		// Conflito, resolvendo com merge
-		kv.resolveConflictWithMerge(key, incomingValue, existingValue)
-		kv.SaveToDisk() // Persistir no disco
-	}
+// PageManager gerencia a escrita e leitura de páginas no disco
+type PageManager struct {
+	File       *os.File
+	NextPageID int64
+	Mutex      sync.Mutex
 }
 
-// resolveConflictWithMerge resolve o conflito entre dois valores, combinando-os
-func (kv *KVStore) resolveConflictWithMerge(key, incomingValue, existingValue string) {
-	// Implementação simples: concatenar os valores como uma forma de resolução de conflitos
-	mergedValue := mergeValues(existingValue, incomingValue)
-	kv.store[key] = mergedValue
-	fmt.Printf("Conflito resolvido para chave %s. Valores mesclados: %s\n", key, mergedValue)
-}
-
-// mergeValues é uma função auxiliar para combinar dois valores em caso de conflito
-func mergeValues(value1, value2 string) string {
-	if value1 == value2 {
-		return value1 // Se os valores forem iguais, mantenha apenas um
-	}
-	return value1 + " | " + value2 // Combina os valores com um delimitador
-}
-
-// saveToDiskInternal salva os dados no disco sem bloquear o mutex
-func (kv *KVStore) saveToDiskInternal() {
-	fmt.Printf("Tentando salvar os dados no arquivo %s\n", kv.dataFile)
-	file, err := os.Create(kv.dataFile)
+// Função para inicializar o KeyValueStore com todos os componentes integrados
+func NewKeyValueStore(gossip *Gossip, consistentHash *ConsistentHashing, handoffInterval time.Duration, pageFileName string) (*KeyValueStore, error) {
+	pageManager, err := NewPageManager(pageFileName)
 	if err != nil {
-		fmt.Println("Erro ao criar arquivo de persistência:", err)
-		return
+		return nil, err
 	}
-	defer func() {
-		if err := file.Close(); err != nil {
-			fmt.Println("Erro ao fechar o arquivo:", err)
+
+	return &KeyValueStore{
+		Data:            make(map[string]*DataItem),
+		HintedData:      make(map[string]*Hint),
+		PageManager:     pageManager,
+		Gossip:          gossip,
+		ConsistentHash:  consistentHash,
+		HandoffInterval: handoffInterval,
+	}, nil
+}
+
+// Função para inicializar o PageManager e abrir o arquivo de páginas
+func NewPageManager(filename string) (*PageManager, error) {
+	file, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE, 0755)
+	if err != nil {
+		return nil, err
+	}
+
+	return &PageManager{
+		File:       file,
+		NextPageID: 0,
+	}, nil
+}
+
+// Função para alocar uma nova página
+func (pm *PageManager) AllocatePage() *Page {
+	pm.Mutex.Lock()
+	defer pm.Mutex.Unlock()
+
+	page := &Page{
+		ID:     pm.NextPageID,
+		Buffer: make([]byte, PageSize),
+		Used:   0,
+	}
+	pm.NextPageID++
+	return page
+}
+
+// Função para escrever uma página no disco
+func (pm *PageManager) WritePage(page *Page) error {
+	pm.Mutex.Lock()
+	defer pm.Mutex.Unlock()
+
+	offset := page.ID * PageSize
+	_, err := pm.File.Seek(offset, 0)
+	if err != nil {
+		return err
+	}
+	_, err = pm.File.Write(page.Buffer)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// Função para ler uma página do disco
+func (pm *PageManager) ReadPage(pageID int64) (*Page, error) {
+	pm.Mutex.Lock()
+	defer pm.Mutex.Unlock()
+
+	offset := pageID * PageSize
+	_, err := pm.File.Seek(offset, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	buffer := make([]byte, PageSize)
+	_, err = pm.File.Read(buffer)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Page{
+		ID:     pageID,
+		Buffer: buffer,
+		Used:   PageSize,
+	}, nil
+}
+
+// Função para persistir dados em uma página no disco
+func (kv *KeyValueStore) writeDataToDisk(key, value string) {
+	page := kv.PageManager.AllocatePage()
+
+	// Escreve a chave e o valor no buffer da página
+	binaryKey := []byte(key)
+	binaryValue := []byte(value)
+
+	copy(page.Buffer, binaryKey)
+	copy(page.Buffer[len(binaryKey):], binaryValue)
+
+	err := kv.PageManager.WritePage(page)
+	if err != nil {
+		log.Printf("Error writing page for key %s: %v", key, err)
+	} else {
+		log.Printf("Wrote key %s to disk", key)
+	}
+}
+
+func (kv *KeyValueStore) Put(key, value string) {
+	kv.Mutex.Lock()
+	defer kv.Mutex.Unlock()
+
+	vnode := kv.ConsistentHash.GetNode(key)
+
+	// Se o nó responsável pela chave está offline, fazer hinted handoff
+	if !kv.Gossip.IsNodeAlive(vnode.ID) {
+		log.Printf("Node %s is down. Storing hinted handoff for key %s", vnode.ID, key)
+		kv.HintedData[key] = &Hint{
+			Key:       key,
+			Value:     value,
+			TargetID:  vnode.ID,
+			Timestamp: time.Now(),
 		}
-	}()
-
-	encoder := json.NewEncoder(file)
-	err = encoder.Encode(kv.store)
-	if err != nil {
-		fmt.Println("Erro ao salvar os dados no disco:", err)
 		return
 	}
-	fmt.Println("Dados salvos com sucesso no disco.")
+
+	// Se a chave já existe, faz merge dos vector clocks
+	if item, exists := kv.Data[key]; exists {
+		item.VectorClock.Increment(kv.Gossip.Self.ID) // Incrementa o Vector Clock local
+		log.Printf("Updated key %s with new value. VectorClock: %s", key, item.VectorClock.String())
+		item.Value = value
+	} else {
+		// Se for um novo dado, cria um Vector Clock e adiciona
+		vc := vectorclock.NewVectorClock()
+		vc.Increment(kv.Gossip.Self.ID)
+		kv.Data[key] = &DataItem{
+			Value:       value,
+			VectorClock: vc,
+		}
+		log.Printf("Stored key %s with initial VectorClock: %s", key, vc.String())
+	}
+
+	// Persistir o dado no disco usando páginas
+	kv.writeDataToDisk(key, value)
 }
 
-// SaveToDisk salva os dados do KV-Store no arquivo JSON
-func (kv *KVStore) SaveToDisk() {
-	kv.mu.Lock() // Reativar o mutex para garantir concorrência segura
-	defer kv.mu.Unlock()
+func (kv *KeyValueStore) Get(key string) (string, *vectorclock.VectorClock, bool) {
+	kv.Mutex.Lock()
+	defer kv.Mutex.Unlock()
 
-	fmt.Printf("Tentando salvar os dados no arquivo %s\n", kv.dataFile)
-	file, err := os.Create(kv.dataFile)
-	if err != nil {
-		fmt.Println("Erro ao criar arquivo de persistência:", err)
-		return
-	}
-	defer func() {
-		if err := file.Close(); err != nil {
-			fmt.Println("Erro ao fechar o arquivo:", err)
+	vnode := kv.ConsistentHash.GetNode(key)
+
+	// Verifica se o nó responsável está online
+	if kv.Gossip.IsNodeAlive(vnode.ID) {
+		if item, exists := kv.Data[key]; exists {
+			return item.Value, item.VectorClock, true
 		}
-	}()
-
-	encoder := json.NewEncoder(file)
-	err = encoder.Encode(kv.store)
-	if err != nil {
-		fmt.Println("Erro ao salvar os dados no disco:", err)
-		return
+		log.Printf("Key %s not found in node %s", key, vnode.ID)
+	} else {
+		log.Printf("Node %s is down. Key %s might be in hinted handoff.", vnode.ID, key)
 	}
-	fmt.Println("Dados salvos com sucesso no disco.")
+
+	// Se não estiver na memória, tenta carregar do disco
+	value, found := kv.readDataFromDisk(key)
+	if found {
+		return value, nil, true
+	}
+
+	return "", nil, false
 }
 
-// LoadFromDisk carrega os dados do arquivo JSON para a memória do KV-Store
-func (kv *KVStore) LoadFromDisk() {
-	file, err := os.Open(kv.dataFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// Se o arquivo não existir, inicializamos com um mapa vazio
-			fmt.Println("Nenhum arquivo de persistência encontrado, iniciando um novo armazenamento.")
-			return
-		}
-		fmt.Println("Erro ao abrir o arquivo de persistência:", err)
-		return
-	}
-	defer file.Close()
+// Função para ler dados de uma página do disco
+func (kv *KeyValueStore) readDataFromDisk(key string) (string, bool) {
+	pageID := kv.getPageIDForKey(key)
 
-	decoder := json.NewDecoder(file)
-	err = decoder.Decode(&kv.store)
+	page, err := kv.PageManager.ReadPage(pageID)
 	if err != nil {
-		fmt.Println("Erro ao carregar os dados do disco:", err)
+		log.Printf("Error reading page for key %s: %v", key, err)
+		return "", false
+	}
+
+	value := string(page.Buffer)
+	log.Printf("Read key %s from disk", key)
+	return value, true
+}
+
+// Função que mapeia uma chave para um ID de página
+func (kv *KeyValueStore) getPageIDForKey(key string) int64 {
+	return int64(len(key)) // Exemplo simples de mapeamento de chave para página
+}
+
+// Função para processar hinted handoff e reenviar dados para o nó de destino quando ele voltar
+func (kv *KeyValueStore) StartHintedHandoff() {
+	ticker := time.NewTicker(kv.HandoffInterval)
+	for range ticker.C {
+		kv.processHintedHandoff()
+	}
+}
+
+// Processa hinted handoffs e tenta reenviar os dados para o nó original
+func (kv *KeyValueStore) processHintedHandoff() {
+	kv.Mutex.Lock()
+	defer kv.Mutex.Unlock()
+
+	for key, hint := range kv.HintedData {
+		if kv.Gossip.IsNodeAlive(hint.TargetID) {
+			log.Printf("Reapplying hinted handoff for key %s to node %s", key, hint.TargetID)
+			kv.Data[key] = &DataItem{
+				Value: hint.Value,
+			}
+			delete(kv.HintedData, key) // Remove o hint após a transferência
+		} else {
+			log.Printf("Node %s still down, keeping hinted handoff for key %s", hint.TargetID, key)
+		}
+	}
+}
+
+// Função para resolver conflitos de escrita concorrente usando Vector Clocks
+func (kv *KeyValueStore) ResolveConflicts(key string, newValue string, newVectorClock *vectorclock.VectorClock) {
+	kv.Mutex.Lock()
+	defer kv.Mutex.Unlock()
+
+	if item, exists := kv.Data[key]; exists {
+		comparison := item.VectorClock.Compare(newVectorClock)
+		switch comparison {
+		case -1: // Novo dado é mais recente
+			log.Printf("Key %s updated with more recent value. New VectorClock: %s", key, newVectorClock.String())
+			item.Value = newValue
+			item.VectorClock.Merge(newVectorClock)
+		case 0: // Conflito detectado
+			log.Printf("Conflict detected for key %s. Keeping both versions.", key)
+		case 1: // Dado existente é mais recente, nenhuma atualização aplicada
+			log.Printf("Existing value for key %s is more recent. No update applied.", key)
+		}
+	} else {
+		kv.Data[key] = &DataItem{
+			Value:       newValue,
+			VectorClock: newVectorClock,
+		}
+		log.Printf("Stored new key %s with VectorClock: %s", key, newVectorClock.String())
 	}
 }

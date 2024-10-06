@@ -1,87 +1,87 @@
 package store
 
 import (
-	"crypto/sha256"
+	"crypto/sha1"
+	"fmt"
+	"log"
 	"sort"
-	"strconv"
 )
 
-// HashRing representa um anel de hash consistente
-type HashRing struct {
-	nodes       []int          // Lista de hashes dos nós virtuais
-	nodeMap     map[int]string // Mapa do hash para o nó físico
-	virtualNode int            // Número de nós virtuais por nó físico
+// Definição da estrutura ConsistentHashing
+type ConsistentHashing struct {
+	VNodes       int                      // Número de nós virtuais (vNodes)
+	HashFunction func(data string) uint32 // Função de hash
+	SortedHashes []uint32                 // Lista de hashes ordenados
+	HashMap      map[uint32]*Node         // Mapa de hashes para os nós
 }
 
-// NewHashRing cria um novo anel de hash consistente
-func NewHashRing(virtualNode int) *HashRing {
-	return &HashRing{
-		nodes:       []int{},
-		nodeMap:     make(map[int]string),
-		virtualNode: virtualNode,
+// Função para criar um novo ConsistentHashing
+func NewConsistentHashing(vNodes int) *ConsistentHashing {
+	return &ConsistentHashing{
+		VNodes:       vNodes,
+		HashFunction: defaultHashFunction, // Função de hash padrão (SHA-1)
+		SortedHashes: []uint32{},
+		HashMap:      make(map[uint32]*Node),
 	}
 }
 
-// AddNode adiciona um nó físico ao anel, com seus nós virtuais
-func (h *HashRing) AddNode(node string) {
-	for i := 0; i < h.virtualNode; i++ {
-		// Criar nós virtuais, cada um com um hash diferente
-		virtualNodeID := node + "#" + strconv.Itoa(i)
-		hash := int(hash(virtualNodeID))
-		h.nodes = append(h.nodes, hash)
-		h.nodeMap[hash] = node
-	}
-
-	// Ordenar os nós virtuais para manter o anel ordenado
-	sort.Ints(h.nodes)
+// Função de hash padrão (SHA-1)
+func defaultHashFunction(data string) uint32 {
+	hash := sha1.New()
+	hash.Write([]byte(data))
+	sum := hash.Sum(nil)
+	return uint32(sum[0])<<24 | uint32(sum[1])<<16 | uint32(sum[2])<<8 | uint32(sum[3])
 }
 
-// GetNode retorna o nó responsável por uma chave específica
-func (h *HashRing) GetNode(key string) string {
-	if len(h.nodes) == 0 {
-		return ""
+// Adiciona um nó ao anel de Consistent Hashing
+func (ch *ConsistentHashing) AddNode(node *Node) {
+	for i := 0; i < ch.VNodes; i++ {
+		vnodeKey := fmt.Sprintf("%s-%d", node.ID, i)
+		hash := ch.HashFunction(vnodeKey)
+
+		ch.SortedHashes = append(ch.SortedHashes, hash)
+		ch.HashMap[hash] = node
 	}
 
-	hash := int(hash(key))
-
-	// Encontrar o primeiro nó com hash maior ou igual ao da chave
-	idx := sort.Search(len(h.nodes), func(i int) bool {
-		return h.nodes[i] >= hash
+	sort.Slice(ch.SortedHashes, func(i, j int) bool {
+		return ch.SortedHashes[i] < ch.SortedHashes[j]
 	})
-
-	// Se passarmos do último nó, usamos o primeiro nó no anel (efeito "circular")
-	if idx == len(h.nodes) {
-		idx = 0
-	}
-
-	return h.nodeMap[h.nodes[idx]]
 }
 
-// GetNodes retorna múltiplos nós responsáveis pela replicação da chave
-func (h *HashRing) GetNodes(key string, replicas int) []string {
-	if len(h.nodes) == 0 || replicas <= 0 {
+// Remove um nó do anel de Consistent Hashing
+func (ch *ConsistentHashing) RemoveNode(nodeID string) {
+	for i := 0; i < ch.VNodes; i++ {
+		vnodeKey := fmt.Sprintf("%s-%d", nodeID, i)
+		hash := ch.HashFunction(vnodeKey)
+
+		delete(ch.HashMap, hash)
+
+		// Remover o hash da lista de hashes ordenados
+		for idx, h := range ch.SortedHashes {
+			if h == hash {
+				ch.SortedHashes = append(ch.SortedHashes[:idx], ch.SortedHashes[idx+1:]...)
+				break
+			}
+		}
+	}
+}
+
+// Retorna o nó apropriado para uma chave, baseado no Consistent Hashing
+func (ch *ConsistentHashing) GetNode(key string) *Node {
+	if len(ch.SortedHashes) == 0 {
+		log.Panicln("No nodes available in the Consistent Hashing ring.")
 		return nil
 	}
 
-	hash := int(hash(key))
-	idx := sort.Search(len(h.nodes), func(i int) bool {
-		return h.nodes[i] >= hash
+	hash := ch.HashFunction(key)
+	idx := sort.Search(len(ch.SortedHashes), func(i int) bool {
+		return ch.SortedHashes[i] >= hash
 	})
 
-	var result []string
-	for i := 0; i < replicas; i++ {
-		if idx == len(h.nodes) {
-			idx = 0
-		}
-		result = append(result, h.nodeMap[h.nodes[idx]])
-		idx++
+	// Se não encontrar um valor maior, retorna o primeiro nó
+	if idx == len(ch.SortedHashes) {
+		idx = 0
 	}
 
-	return result
-}
-
-// Função hash simples usando SHA-256
-func hash(s string) uint32 {
-	hash := sha256.Sum256([]byte(s))
-	return (uint32(hash[0]) << 24) | (uint32(hash[1]) << 16) | (uint32(hash[2]) << 8) | uint32(hash[3])
+	return ch.HashMap[ch.SortedHashes[idx]]
 }

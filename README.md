@@ -29,12 +29,14 @@ cd kvstore-golang
 
 Para simular um ambiente distribuído com múltiplos nós, você precisará abrir diferentes terminais para rodar as instâncias.
 
+> Para fins de desenvolvimento o padrão irá logar a comunicação entre nós. Portanto use o argumento --cli-only após os comandos abaixo.
+
 **Terminal 1: Rodar o Nó 1**
 
 Abra o primeiro terminal e execute o nó 1:
 
 ```bash
-go run main.go
+go run main.go --port=8081 --id=node1
 ```
 
 **Terminal 2: Rodar o Nó 2**
@@ -42,8 +44,25 @@ go run main.go
 No segundo terminal, você pode rodar o nó 2:
 
 ```bash
-go run main.go
+go run main.go --port=8082 --id=node2
 ```
+
+**Terminal 2: Rodar o Nó 3**
+
+No segundo terminal, você pode rodar o nó 2:
+
+```bash
+go run main.go --port=8083 --id=node3
+```
+
+**Rodar os nós em modo CLI**
+
+Altere o número do nó para 1, 2 ou 3 e a porta 8081, 8082 ou 8083.
+
+```bash
+go run main.go --port=8083 --id=node3 --cli-only
+```
+
 
 ### 3. Usar os Comandos Interativos no Console
 

@@ -1,223 +1,291 @@
 package store
 
 import (
-	"encoding/json"
 	"fmt"
+	"log"
 	"net"
-	"os"
+	"sync"
 	"time"
+
+	"github.com/bquerino/kv-g/internal/vectorclock"
 )
 
-// GossipNode representa um nó que comunica via Gossip Protocol
-type GossipNode struct {
-	address       string               // Endereço do nó
-	peers         []string             // Lista de peers
-	KVStore       *KVStore             // O KV-Store local (agora exportado)
-	incoming      chan GossipMsg       // Canal para mensagens recebidas
-	outgoing      chan GossipMsg       // Canal para mensagens enviadas
-	hintedHandoff map[string]GossipMsg // Mapa para armazenar o hinted handoff
-	hintedFile    string               // Arquivo para persistir o hinted handoff
-	timeout       time.Duration        // Timeout para detectar falhas
+type Node struct {
+	ID        string
+	Address   string
+	Alive     bool
+	LastCheck time.Time
 }
 
-// GossipMsg representa uma mensagem de Gossip
-type GossipMsg struct {
-	Key         string         // Chave sendo propagada
-	Value       string         // Valor da chave
-	VectorClock map[string]int // Vector clock
-	NodeID      string         // Identificador do nó
+type Gossip struct {
+	Nodes          map[string]*Node
+	Self           *Node
+	Coordinator    *Node
+	Interval       time.Duration
+	ConsistentHash *ConsistentHashing
+	KeyValueStore  *KeyValueStore // Integração com o KeyValueStore
+	Mutex          sync.Mutex
 }
 
-// NewGossipNode cria um novo nó Gossip
-func NewGossipNode(address string, peers []string, kvStore *KVStore, timeout time.Duration, hintedFile string) *GossipNode {
-	node := &GossipNode{
-		address:       address,
-		peers:         peers,   // Mantemos os peers
-		KVStore:       kvStore, // Substituímos kvStore por KVStore
-		incoming:      make(chan GossipMsg),
-		outgoing:      make(chan GossipMsg),
-		hintedHandoff: make(map[string]GossipMsg),
-		hintedFile:    hintedFile,
-		timeout:       timeout,
+// Inicializa o Gossip Protocol e configura o Consistent Hashing com vNodes
+func NewGossip(selfID, address string, interval time.Duration, vNodes int) *Gossip {
+	self := &Node{
+		ID:      selfID,
+		Address: address,
+		Alive:   true,
 	}
-	node.loadHintedHandoffFromDisk() // Carrega o Hinted Handoff do disco na inicialização
-	go node.start()
-	return node
+
+	gossip := &Gossip{
+		Nodes:          make(map[string]*Node),
+		Self:           self,
+		Interval:       interval,
+		ConsistentHash: NewConsistentHashing(vNodes),
+	}
+
+	// Inicializa o KeyValueStore integrado com o Gossip e PageManager
+	gossip.KeyValueStore, _ = NewKeyValueStore(gossip, gossip.ConsistentHash, 5*time.Second, "data_pages.db")
+
+	return gossip
 }
 
-// start inicia o loop de comunicação Gossip
-func (node *GossipNode) start() {
-	go node.listen()
+// Adiciona um novo nó e seus vNodes à rede de Gossip
+func (g *Gossip) AddNode(nodeID, address string) {
+	g.Mutex.Lock()
+	defer g.Mutex.Unlock()
 
-	for {
-		time.Sleep(time.Duration(2) * time.Second)
+	node := &Node{
+		ID:      nodeID,
+		Address: address,
+		Alive:   true,
+	}
+	g.Nodes[nodeID] = node
+	g.ConsistentHash.AddNode(node)
+}
 
-		select {
-		case msg := <-node.outgoing:
-			node.gossipToPeers(msg)
-		}
+// Remove um nó e seus vNodes da rede de Gossip
+func (g *Gossip) RemoveNode(nodeID string) {
+	g.Mutex.Lock()
+	defer g.Mutex.Unlock()
+
+	delete(g.Nodes, nodeID)
+	g.ConsistentHash.RemoveNode(nodeID)
+}
+
+// Envia mensagens para todos os nós conhecidos
+func (g *Gossip) GossipOut() {
+	g.Mutex.Lock()
+	defer g.Mutex.Unlock()
+
+	for _, node := range g.Nodes {
+		go g.sendMessage(node)
 	}
 }
 
-// listen inicia o listener TCP para ouvir mensagens Gossip
-func (node *GossipNode) listen() {
-	listener, err := net.Listen("tcp", node.address)
+// Recebe mensagens e atualiza o estado dos nós
+func (g *Gossip) GossipIn() {
+	listener, err := net.Listen("tcp", g.Self.Address)
 	if err != nil {
-		fmt.Println("Erro ao iniciar listener:", err)
+		log.Printf("Error starting TCP server: %v", err)
 		return
 	}
+
 	defer listener.Close()
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			fmt.Println("Erro ao aceitar conexão:", err)
+			log.Printf("Error accepting connection: %v", err)
 			continue
 		}
 
-		go node.handleIncoming(conn)
+		go g.handleConnection(conn)
 	}
 }
 
-// handleIncoming lida com mensagens recebidas
-func (node *GossipNode) handleIncoming(conn net.Conn) {
-	defer conn.Close()
-
-	var msg GossipMsg
-	err := decode(conn, &msg)
+// Envia uma mensagem de verificação de saúde para o nó
+func (g *Gossip) sendMessage(node *Node) {
+	conn, err := net.Dial("tcp", node.Address)
 	if err != nil {
-		fmt.Println("Erro ao decodificar mensagem:", err)
-		return
-	}
-
-	// Processar a mensagem recebida, reconciliando os dados no KV-Store
-	node.KVStore.Reconcile(msg.Key, msg.Value, msg.VectorClock, msg.NodeID, time.Now())
-}
-
-// gossipToPeers envia uma mensagem para os peers com timeout
-func (node *GossipNode) gossipToPeers(msg GossipMsg) {
-	for _, peer := range node.peers {
-		go node.sendToPeerWithTimeout(peer, msg)
-	}
-}
-
-// sendToPeerWithTimeout envia mensagem a um peer com timeout e aplica hinted handoff se necessário
-func (node *GossipNode) sendToPeerWithTimeout(peer string, msg GossipMsg) {
-	conn, err := net.DialTimeout("tcp", peer, node.timeout)
-	if err != nil {
-		fmt.Println("Timeout ou erro ao conectar com o peer:", peer)
-		// Se o peer não estiver disponível, aplicar hinted handoff
-		node.hintedHandoff[msg.Key] = msg
-		node.persistHintedHandoffToDisk() // Persiste no disco após a falha
-		fmt.Printf("Hinted Handoff: chave %s armazenada para entrega futura ao peer %s.\n", msg.Key, peer)
+		log.Printf("Error connecting to node %s: %v", node.ID, err)
+		g.markNodeDead(node)
 		return
 	}
 	defer conn.Close()
 
-	err = encode(conn, msg)
-	if err != nil {
-		fmt.Println("Erro ao enviar mensagem para o peer:", err)
+	// Envia um ping simples
+	log.Printf("Sending PING to node %s", node.ID)
+	fmt.Fprintf(conn, "PING from %s\n", g.Self.ID)
+}
+
+// Lida com uma conexão recebida (PING de outro nó)
+func (g *Gossip) handleConnection(conn net.Conn) {
+	defer conn.Close()
+
+	var nodeID string
+	fmt.Fscanf(conn, "PING from %s\n", &nodeID)
+
+	g.Mutex.Lock()
+	defer g.Mutex.Unlock()
+
+	if node, exists := g.Nodes[nodeID]; exists {
+		node.LastCheck = time.Now()
+		node.Alive = true
+		log.Printf("Received PING from node %s", node.ID)
+	} else {
+		log.Printf("Unknown node: %s", nodeID)
 	}
 }
 
-// persistHintedHandoffToDisk persiste o hinted handoff no disco
-func (node *GossipNode) persistHintedHandoffToDisk() {
-	file, err := os.Create(node.hintedFile)
-	if err != nil {
-		fmt.Println("Erro ao criar arquivo de hinted handoff:", err)
-		return
-	}
-	defer file.Close()
+// Marca um nó como morto se ele não responder
+func (g *Gossip) markNodeDead(node *Node) {
+	g.Mutex.Lock()
+	defer g.Mutex.Unlock()
 
-	encoder := json.NewEncoder(file)
-	err = encoder.Encode(node.hintedHandoff)
-	if err != nil {
-		fmt.Println("Erro ao persistir hinted handoff no disco:", err)
+	node.Alive = false
+	log.Printf("Node %s is marked as dead", node.ID)
+	if g.Coordinator != nil && g.Coordinator.ID == node.ID {
+		log.Printf("Coordinator %s is down! Initiating election.", node.ID)
+		go g.initiateElection()
 	}
 }
 
-// / loadHintedHandoffFromDisk carrega o hinted handoff do disco
-func (node *GossipNode) loadHintedHandoffFromDisk() {
-	// Tenta abrir o arquivo de hinted handoff
-	file, err := os.Open(node.hintedFile)
-	if err != nil {
-		// Se o arquivo não existir, cria um arquivo vazio
-		if os.IsNotExist(err) {
-			fmt.Printf("Arquivo de hinted handoff não encontrado. Criando novo arquivo: %s\n", node.hintedFile)
-			// Cria um novo arquivo vazio
-			file, err = os.Create(node.hintedFile)
-			if err != nil {
-				fmt.Println("Erro ao criar arquivo de hinted handoff:", err)
-				return
-			}
-			defer file.Close()
-			// Inicializa o mapa de hinted handoff como vazio
-			node.hintedHandoff = make(map[string]GossipMsg)
-			return
-		}
-		fmt.Println("Erro ao abrir arquivo de hinted handoff:", err)
-		return
-	}
-	defer file.Close()
-
-	// Verifica se o arquivo está vazio
-	stat, err := file.Stat()
-	if err != nil {
-		fmt.Println("Erro ao obter informações do arquivo:", err)
-		return
-	}
-
-	// Se o arquivo estiver vazio, inicializa o mapa como vazio e retorna
-	if stat.Size() == 0 {
-		fmt.Printf("Arquivo de hinted handoff %s está vazio. Inicializando mapa vazio.\n", node.hintedFile)
-		node.hintedHandoff = make(map[string]GossipMsg)
-		return
-	}
-
-	// Decodifica o conteúdo do arquivo se ele não estiver vazio
-	decoder := json.NewDecoder(file)
-	err = decoder.Decode(&node.hintedHandoff)
-	if err != nil {
-		fmt.Println("Erro ao carregar hinted handoff do disco:", err)
+// Função de loop para enviar pings periodicamente
+func (g *Gossip) StartGossip() {
+	ticker := time.NewTicker(g.Interval)
+	for range ticker.C {
+		g.GossipOut()
 	}
 }
 
-// RetryHintedHandoff tenta reenviar as mensagens do hinted handoff
-func (node *GossipNode) RetryHintedHandoff() {
-	for key, msg := range node.hintedHandoff {
-		for _, peer := range node.peers {
-			conn, err := net.Dial("tcp", peer)
-			if err == nil {
-				err = encode(conn, msg)
-				if err == nil {
-					fmt.Printf("Hinted Handoff resolvido para chave %s no peer %s\n", key, peer)
-					delete(node.hintedHandoff, key)
-					node.persistHintedHandoffToDisk() // Atualiza o arquivo após remoção
-				}
-				conn.Close()
-			}
+// Função que inicia uma eleição quando o coordenador falha
+func (g *Gossip) initiateElection() {
+	log.Println("Starting election...")
+
+	g.Mutex.Lock()
+	defer g.Mutex.Unlock()
+
+	higherNodes := g.getHigherNodes()
+
+	if len(higherNodes) == 0 {
+		// Se não há nós com IDs maiores, o nó atual se torna o coordenador
+		g.becomeCoordinator()
+	} else {
+		// Envia mensagens para os nós com IDs maiores
+		for _, node := range higherNodes {
+			go g.sendElectionMessage(node)
 		}
 	}
 }
 
-// encode serializa a mensagem para o formato JSON e a envia pela conexão
-func encode(conn net.Conn, msg GossipMsg) error {
-	encoder := json.NewEncoder(conn)
-	err := encoder.Encode(&msg)
-	if err != nil {
-		fmt.Println("Erro ao serializar mensagem:", err)
-		return err
+// Retorna uma lista de nós com IDs maiores que o do nó atual
+func (g *Gossip) getHigherNodes() []*Node {
+	var higherNodes []*Node
+	for _, node := range g.Nodes {
+		if node.ID > g.Self.ID && node.Alive {
+			higherNodes = append(higherNodes, node)
+		}
 	}
-	return nil
+	return higherNodes
 }
 
-// decode desserializa a mensagem recebida via conexão para o formato GossipMsg
-func decode(conn net.Conn, msg *GossipMsg) error {
-	decoder := json.NewDecoder(conn)
-	err := decoder.Decode(msg)
+// Envia uma mensagem de eleição para um nó com ID maior
+func (g *Gossip) sendElectionMessage(node *Node) {
+	conn, err := net.Dial("tcp", node.Address)
 	if err != nil {
-		fmt.Println("Erro ao desserializar mensagem:", err)
-		return err
+		log.Printf("Error connecting to node %s during election: %v", node.ID, err)
+		g.markNodeDead(node)
+		return
 	}
-	return nil
+	defer conn.Close()
+
+	log.Printf("Sending ELECTION message to node %s", node.ID)
+	fmt.Fprintf(conn, "ELECTION from %s\n", g.Self.ID)
+
+	// Espera resposta de "OK"
+	var response string
+	fmt.Fscanf(conn, "%s\n", &response)
+	if response == "OK" {
+		log.Printf("Node %s responded to election", node.ID)
+		return
+	}
+}
+
+// Define o nó atual como coordenador
+func (g *Gossip) becomeCoordinator() {
+	log.Println("Becoming the coordinator.")
+	g.Coordinator = g.Self
+
+	// Anuncia para todos os nós que este nó é o novo coordenador
+	g.announceCoordinator()
+}
+
+// Anuncia que o nó atual é o coordenador para todos os outros nós
+func (g *Gossip) announceCoordinator() {
+	g.Mutex.Lock()
+	defer g.Mutex.Unlock()
+
+	for _, node := range g.Nodes {
+		go g.sendCoordinatorMessage(node)
+	}
+}
+
+// Envia uma mensagem de anúncio de coordenador para um nó
+func (g *Gossip) sendCoordinatorMessage(node *Node) {
+	conn, err := net.Dial("tcp", node.Address)
+	if err != nil {
+		log.Printf("Error connecting to node %s to announce coordinator: %v", node.ID, err)
+		g.markNodeDead(node)
+		return
+	}
+	defer conn.Close()
+
+	log.Printf("Announcing self as COORDINATOR to node %s", node.ID)
+	fmt.Fprintf(conn, "COORDINATOR %s\n", g.Self.ID)
+}
+
+// Mapeia uma chave para o nó apropriado
+func (g *Gossip) GetNodeForKey(key string) *Node {
+	return g.ConsistentHash.GetNode(key)
+}
+
+// Verifica se um nó está vivo
+func (g *Gossip) IsNodeAlive(nodeID string) bool {
+	g.Mutex.Lock()
+	defer g.Mutex.Unlock()
+
+	if node, exists := g.Nodes[nodeID]; exists {
+		return node.Alive
+	}
+	return false
+}
+
+// Envia um PUT para o KeyValueStore
+func (g *Gossip) Put(key, value string) {
+	g.KeyValueStore.Put(key, value)
+}
+
+// Envia um GET para o KeyValueStore
+func (g *Gossip) Get(key string) (string, *vectorclock.VectorClock, bool) {
+	return g.KeyValueStore.Get(key)
+}
+
+// Envia um DELETE para o KeyValueStore (implementar no KeyValueStore, se ainda não estiver feito)
+func (g *Gossip) Delete(key string) {
+	// Adicione o método Delete no KeyValueStore para lidar com a remoção de chaves
+	// g.KeyValueStore.Delete(key)
+	log.Println("Delete operation is not yet implemented in KeyValueStore.")
+}
+
+// Imprime os nós ativos no cluster
+func (g *Gossip) PrintNodes() {
+	g.Mutex.Lock()
+	defer g.Mutex.Unlock()
+
+	for id, node := range g.Nodes {
+		status := "alive"
+		if !node.Alive {
+			status = "dead"
+		}
+		log.Printf("Node: %s, Address: %s, Status: %s", id, node.Address, status)
+	}
 }

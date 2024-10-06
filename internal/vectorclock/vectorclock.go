@@ -1,37 +1,71 @@
 package vectorclock
 
-// VectorClock representa um "vetor de tempo" para reconciliação de dados
-type VectorClock map[string]int
+import (
+	"fmt"
+)
 
-// Update atualiza o VectorClock de acordo com um novo nó
-func (vc VectorClock) Update(nodeID string) {
-	vc[nodeID]++
+type VectorClock struct {
+	Clock map[string]int // Mapa que associa NodeID ao contador
 }
 
-// Compare dois VectorClocks e retorna:
-// -1 se "other" é mais novo, 1 se "vc" é mais novo, e 0 se são concorrentes
-func (vc VectorClock) Compare(other VectorClock) int {
-	isLess, isGreater := false, false
+// Inicializa um VectorClock vazio
+func NewVectorClock() *VectorClock {
+	return &VectorClock{
+		Clock: make(map[string]int),
+	}
+}
 
-	for nodeID, timestamp := range vc {
-		otherTimestamp, exists := other[nodeID]
-		if !exists || timestamp > otherTimestamp {
+// Incrementa o contador para um determinado nó (NodeID)
+func (vc *VectorClock) Increment(nodeID string) {
+	vc.Clock[nodeID]++
+}
+
+// Atualiza o VectorClock com outro VectorClock (merge)
+func (vc *VectorClock) Merge(other *VectorClock) {
+	for nodeID, counter := range other.Clock {
+		if currentCounter, exists := vc.Clock[nodeID]; !exists || counter > currentCounter {
+			vc.Clock[nodeID] = counter
+		}
+	}
+}
+
+// Compara dois Vector Clocks para determinar a relação entre eles
+// Retorna:
+//
+//	-1: se vc é "menor" (mais antigo) que o outro
+//	 1: se vc é "maior" (mais recente) que o outro
+//	 0: se vc e outro estão em conflito (concurrentes)
+func (vc *VectorClock) Compare(other *VectorClock) int {
+	isLess := false
+	isGreater := false
+
+	for nodeID, counter := range vc.Clock {
+		if otherCounter, exists := other.Clock[nodeID]; exists {
+			if counter < otherCounter {
+				isLess = true
+			} else if counter > otherCounter {
+				isGreater = true
+			}
+		} else {
 			isGreater = true
-		} else if timestamp < otherTimestamp {
+		}
+	}
+
+	for nodeID := range other.Clock {
+		if _, exists := vc.Clock[nodeID]; !exists {
 			isLess = true
 		}
 	}
 
-	// Se é menor e maior simultaneamente, são concorrentes
-	if isLess && isGreater {
-		return 0 // Concorrente
-	} else if isGreater {
-		return 1 // Este VectorClock é mais recente
+	if isLess && !isGreater {
+		return -1 // vc é mais antigo
+	} else if isGreater && !isLess {
+		return 1 // vc é mais recente
 	}
-	return -1 // O outro VectorClock é mais recente
+	return 0 // Conflito
 }
 
-// Concorrente verifica se dois VectorClocks são concorrentes
-func (vc VectorClock) Concorrente(other VectorClock) bool {
-	return vc.Compare(other) == 0
+// Retorna uma string que representa o estado atual do VectorClock
+func (vc *VectorClock) String() string {
+	return fmt.Sprintf("%v", vc.Clock)
 }

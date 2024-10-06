@@ -2,9 +2,9 @@ package main
 
 import (
 	"bufio"
+	"flag"
 	"fmt"
-	"math/rand"
-	"net"
+	"log"
 	"os"
 	"strings"
 	"time"
@@ -12,89 +12,98 @@ import (
 	"github.com/bquerino/kv-g/internal/store"
 )
 
-var nodeKV *store.KVStore
-
-// Função para encontrar uma porta livre no intervalo de 10.000 a 65.535
-func getFreePortInRange(start, end int) (int, error) {
-	for {
-		port := rand.Intn(end-start) + start
-		address := fmt.Sprintf(":%d", port)
-		listener, err := net.Listen("tcp", address)
-		if err == nil {
-			// Porta encontrada com sucesso
-			defer listener.Close()
-			return port, nil
-		}
-		// Se a porta não estiver disponível, tentar outra
-	}
-}
-
 func main() {
-	// Criar anel de hash consistente com 3 nós virtuais por nó físico
-	ring := store.NewHashRing(3)
+	// Parâmetros para porta, ID e modo CLI-only
+	port := flag.String("port", "8081", "Porta para o nó atual")
+	nodeID := flag.String("id", "node1", "ID do nó atual")
+	cliOnly := flag.Bool("cli-only", false, "Rodar somente o CLI sem o protocolo Gossip")
+	flag.Parse()
 
-	// Defina o nodeID conforme necessário
-	nodeID := "node" // Ajuste o ID do nó conforme necessário
-
-	// Criar o GossipNode e associá-lo ao KV-Store
-	nodeGossip := store.NewGossipNode(nodeID, []string{}, nil, 2*time.Second, fmt.Sprintf("%s_hint.json", nodeID))
-	nodeKV = store.NewKVStore(nodeID, ring, 3, nodeGossip)
-
-	// Tentar encontrar uma porta livre no intervalo de 10000 a 65535
-	port, err := getFreePortInRange(10000, 65535)
+	// Inicializar os nós e a comunicação TCP
+	gossip, err := initializeCluster(*nodeID, *port)
 	if err != nil {
-		fmt.Println("Erro ao tentar obter uma porta livre:", err)
-		return
+		log.Fatalf("Failed to initialize cluster: %v", err)
 	}
 
-	// Exibe a porta escolhida
-	fmt.Printf("Nó %s rodando na porta %d\n", nodeID, port)
+	// Se não estiver no modo CLI-only, iniciar o protocolo Gossip
+	if !*cliOnly {
+		// Start Gossip Protocol (GossipOut)
+		go gossip.StartGossip()
 
-	// Iniciar o loop interativo para inserir e consultar chave/valor
-	go startKVStoreInteraction()
+		// Iniciar servidor para ouvir conexões (GossipIn)
+		go gossip.GossipIn()
+	}
 
-	// Simular o funcionamento do servidor, aguardando conexões (apenas como placeholder)
-	select {} // Impede a finalização da aplicação
+	// CLI interativa
+	runCLI(gossip)
 }
 
-// Função para interações do KV-Store no console
-func startKVStoreInteraction() {
+func initializeCluster(nodeID, port string) (*store.Gossip, error) {
+	address := fmt.Sprintf("localhost:%s", port)
+
+	gossip := store.NewGossip(nodeID, address, 3*time.Second, 3)
+
+	// Adicionar todos os nós ao cluster
+	if nodeID == "node1" {
+		gossip.AddNode("node2", "localhost:8082")
+		gossip.AddNode("node3", "localhost:8083")
+	} else if nodeID == "node2" {
+		gossip.AddNode("node1", "localhost:8081")
+		gossip.AddNode("node3", "localhost:8083")
+	} else if nodeID == "node3" {
+		gossip.AddNode("node1", "localhost:8081")
+		gossip.AddNode("node2", "localhost:8082")
+	}
+
+	return gossip, nil
+}
+
+// Função que inicia a interface CLI interativa
+func runCLI(gossip *store.Gossip) {
 	reader := bufio.NewReader(os.Stdin)
+	fmt.Println("Welcome to the KV Store CLI!")
+	fmt.Println("-----------------------------")
+
 	for {
-		fmt.Println("Digite 'set chave valor' para inserir ou 'get chave' para consultar, ou 'sair' para finalizar:")
+		fmt.Print("> ")
 		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(input)
-		if input == "sair" {
-			break
-		}
+		args := strings.Split(input, " ")
 
-		parts := strings.Fields(input)
-		if len(parts) < 2 {
-			fmt.Println("Entrada inválida. Por favor, insira no formato 'set chave valor' ou 'get chave'.")
-			continue
-		}
-
-		command := parts[0]
-		key := parts[1]
-
-		switch command {
-		case "set":
-			if len(parts) != 3 {
-				fmt.Println("Entrada inválida. O formato para 'set' é: set chave valor.")
+		switch args[0] {
+		case "put":
+			if len(args) != 3 {
+				fmt.Println("Usage: put <key> <value>")
 				continue
 			}
-			value := parts[2]
-			nodeKV.Set(key, value)
-			fmt.Printf("Chave '%s' com valor '%s' foi armazenada no KV-Store!\n", key, value)
+			key, value := args[1], args[2]
+			gossip.Put(key, value)
 		case "get":
-			value, ok := nodeKV.Get(key)
-			if ok {
-				fmt.Printf("Chave '%s' possui o valor '%s'\n", key, value)
-			} else {
-				fmt.Printf("Chave '%s' não encontrada no KV-Store.\n", key)
+			if len(args) != 2 {
+				fmt.Println("Usage: get <key>")
+				continue
 			}
+			key := args[1]
+			value, vc, found := gossip.Get(key)
+			if found {
+				fmt.Printf("Value: %s, VectorClock: %v\n", value, vc)
+			} else {
+				fmt.Println("Key not found.")
+			}
+		case "delete":
+			if len(args) != 2 {
+				fmt.Println("Usage: delete <key>")
+				continue
+			}
+			key := args[1]
+			gossip.Delete(key)
+		case "nodes":
+			gossip.PrintNodes()
+		case "exit":
+			fmt.Println("Exiting...")
+			return
 		default:
-			fmt.Println("Comando inválido. Use 'set' ou 'get'.")
+			fmt.Println("Unknown command. Available commands: put, get, delete, nodes, exit")
 		}
 	}
 }

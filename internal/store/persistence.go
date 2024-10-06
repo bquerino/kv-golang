@@ -2,33 +2,51 @@ package store
 
 import (
 	"fmt"
-	"os"
+	"log"
 )
 
-// Persistência de dados em disco
+// Constantes de diretório de persistência
 const pageDir = "pages"
 
-// writeToPage escreve os dados na página atual. Se a página estiver cheia, cria uma nova página.
-func (kv *KVStore) writeToPage(data string) {
-	pagePath := kv.getCurrentPagePath()
+// writeToPage escreve os dados na página atual usando o PageManager.
+// Se a página atual estiver cheia, cria uma nova página.
+func (kv *KeyValueStore) writeToPage(key, value string) {
+	// Aloca uma nova página se necessário
+	page := kv.PageManager.AllocatePage()
 
-	// Verifica o tamanho da página atual
-	info, err := os.Stat(pagePath)
-	if err == nil && info.Size() >= pageSize {
-		kv.pageIdx++
-		pagePath = kv.getCurrentPagePath()
+	// Constrói a string de dados para escrita (formato simples: "chave:valor")
+	data := fmt.Sprintf("%s:%s\n", key, value)
+
+	// Converte o dado para bytes
+	binaryData := []byte(data)
+
+	// Verifica se há espaço suficiente na página para escrever o dado
+	if page.Used+len(binaryData) > PageSize {
+		// Se a página estiver cheia, persiste a página e aloca uma nova
+		err := kv.PageManager.WritePage(page)
+		if err != nil {
+			log.Printf("Error writing page: %v", err)
+			return
+		}
+
+		// Aloca uma nova página
+		page = kv.PageManager.AllocatePage()
 	}
 
-	// Abrir ou criar o arquivo da página
-	file, err := os.OpenFile(pagePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	// Escreve os dados na página
+	copy(page.Buffer[page.Used:], binaryData)
+	page.Used += len(binaryData)
+
+	// Persiste a página atualizada
+	err := kv.PageManager.WritePage(page)
 	if err != nil {
-		fmt.Println("Erro ao abrir página:", err)
-		return
+		log.Printf("Error writing page: %v", err)
 	}
-	defer file.Close()
+}
 
-	// Escrever os dados no arquivo
-	if _, err := file.WriteString(data); err != nil {
-		fmt.Println("Erro ao escrever na página:", err)
-	}
+// Função que retorna o caminho da página atual no diretório de persistência
+func (kv *KeyValueStore) getCurrentPagePath() string {
+	// O arquivo de página atual pode ser identificado pelo índice da página
+	pageFile := fmt.Sprintf("%s/page_%d.dat", pageDir, kv.PageManager.NextPageID)
+	return pageFile
 }
