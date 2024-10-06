@@ -120,3 +120,4 @@ Se você rodar múltiplos nós e modificar os mesmos dados em diferentes nós, o
 ### 7. Referências
 
 - [Dynamo: Amazon's Highly Available Key-value Store](https://www.cs.cornell.edu/courses/cs5414/2017fa/papers/dynamo.pdf)
+- test
