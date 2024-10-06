@@ -68,12 +68,12 @@ go run main.go --port=8083 --id=node3 --cli-only
 
 Após iniciar os nós, você pode interagir com o KV-Store usando os comandos set e get diretamente no console.
 
-#### Comando set
+#### Comando put
 
 No terminal do nó, insira uma chave e valor usando o comando set:
 
 ```bash
-set chave valor
+put chave valor
 ```
 
 Esse comando armazena a chave *chave* com o valor *valor* no KV-Store. O valor será persistido no disco.
@@ -85,12 +85,12 @@ Para consultar o valor associado a uma chave, use o comando get:
 get chave
 ```
 
-#### Comando sair
+#### Comando exit
 
 Para finalizar o nó, basta usar o comando:
 
 ```bash
-sair
+exit
 ```
 
 ### 4. Testar a Persistência de Dados
