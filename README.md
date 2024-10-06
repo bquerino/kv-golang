@@ -116,3 +116,7 @@ Se você rodar múltiplos nós e modificar os mesmos dados em diferentes nós, o
     * **kvstore.go**: Implementação principal do KV-Store, incluindo persistência e lógica de reconciliação de dados.
     * **gossip.go**: Implementação do Gossip Protocol para comunicação entre os nós.
     * **persistence.go**: Funções auxiliares para salvar e carregar dados do disco.
+
+### 7. Referências
+
+- [Dynamo: Amazon's Highly Available Key-value Store](https://www.cs.cornell.edu/courses/cs5414/2017fa/papers/dynamo.pdf)
