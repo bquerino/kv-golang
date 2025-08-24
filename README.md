@@ -12,7 +12,24 @@ Este projeto implementa um KV-Store (Key-Value Store) distribuído usando Go, co
 ## Requisitos
 
 - [Go](https://golang.org/dl/) (v1.16 ou superior)
+- [Docker](https://www.docker.com/) e Docker Compose (para execução via contêineres)
 - Um ambiente que permita múltiplas instâncias rodando (múltiplos terminais ou servidores).
+
+## Execução com Docker
+
+É possível levantar três nós da aplicação e um balanceador de carga Nginx usando o Docker Compose incluso neste repositório:
+
+```bash
+docker compose up -d
+```
+
+O Nginx ficará exposto na porta **8080**, encaminhando o tráfego para os três nós. Para interagir com o cluster via CLI, abra um shell em um dos nós e utilize o modo `--cli-only`:
+
+```bash
+docker compose exec node1 sh -c "printf 'put chave valor\nexit\n' | kv-g --port 8081 --id node1 --cli-only"
+```
+
+Substitua `node1` por `node2` ou `node3` para enviar comandos a outros nós.
 
 ## Como Testar o Projeto
 
@@ -22,7 +39,7 @@ Clone o repositório para a sua máquina:
 
 ```bash
 git clone https://github.com/bquerino/kv-golang.git
-cd kvstore-golang
+cd kv-golang
 ```
 
 ### 2. Executar Múltiplos Nós
@@ -47,9 +64,9 @@ No segundo terminal, você pode rodar o nó 2:
 go run main.go --port=8082 --id=node2
 ```
 
-**Terminal 2: Rodar o Nó 3**
+**Terminal 3: Rodar o Nó 3**
 
-No segundo terminal, você pode rodar o nó 2:
+No terceiro terminal, você pode rodar o nó 3:
 
 ```bash
 go run main.go --port=8083 --id=node3
@@ -70,7 +87,7 @@ Após iniciar os nós, você pode interagir com o KV-Store usando os comandos se
 
 #### Comando put
 
-No terminal do nó, insira uma chave e valor usando o comando set:
+No terminal do nó, insira uma chave e valor usando o comando put:
 
 ```bash
 put chave valor
