@@ -34,7 +34,7 @@ func (vc *VectorClock) Merge(other *VectorClock) {
 //
 //	-1: se vc é "menor" (mais antigo) que o outro
 //	 1: se vc é "maior" (mais recente) que o outro
-//	 0: se vc e outro estão em conflito (concurrentes)
+//	 0: se vc e outro estão em conflito (concorrentes)
 func (vc *VectorClock) Compare(other *VectorClock) int {
 	isLess := false
 	isGreater := false
