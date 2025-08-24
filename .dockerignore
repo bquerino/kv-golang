@@ -1,0 +1,12 @@
+# Ignore git metadata and documentation
+.git
+.gitignore
+README.md
+
+# Exclude development artifacts
+bin/
+*.log
+
+# Exclude compose and nginx config from image context
+docker-compose.yml
+nginx.conf
