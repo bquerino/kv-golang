@@ -31,8 +31,8 @@ docker compose exec node1 sh -c "printf 'put chave valor\nexit\n' | kv-g --port 
 
 Substitua `node1` por `node2` ou `node3` para enviar comandos a outros nós.
 
-> Nota: os nós utilizam o próprio ID como hostname (node1, node2, node3).
-> Se estiver executando todos os nós localmente fora do Docker, defina as variáveis de ambiente `NODE1_HOST`, `NODE2_HOST` e `NODE3_HOST` como `localhost` para permitir a comunicação entre eles.
+> Nota: por padrão os nós utilizam `localhost` como hostname para facilitar a execução local.
+> Em ambientes distribuídos, defina as variáveis de ambiente `NODE1_HOST`, `NODE2_HOST` e `NODE3_HOST` para apontar para os hosts corretos.
 
 ## Como Testar o Projeto
 

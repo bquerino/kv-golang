@@ -38,19 +38,20 @@ func main() {
 	runCLI(gossip)
 }
 
-// getNodeAddress retorna o endereço completo de um nó. O hostname pode ser
-// sobrescrito via variável de ambiente <NODE>_HOST (ex: NODE1_HOST), permitindo
-// que cada instância aponte para o host correto em ambientes distribuídos.
+// getNodeAddress retorna o endereço completo de um nó. Por padrão utiliza
+// "localhost" como hostname, mas pode ser sobrescrito via variável de ambiente
+// <NODE>_HOST (ex: NODE1_HOST), permitindo que cada instância aponte para o host
+// correto em ambientes distribuídos.
 func getNodeAddress(id, port string) string {
 	host := os.Getenv(strings.ToUpper(id) + "_HOST")
 	if host == "" {
-		host = id
+		host = "localhost"
 	}
 	return fmt.Sprintf("%s:%s", host, port)
 }
 
 func initializeCluster(nodeID, port string) (*store.Gossip, error) {
-	// Usa o nodeID como hostname para permitir comunicacao entre os nos
+	// Resolve o endereço do nó (por padrão localhost, pode ser sobrescrito via variável de ambiente)
 	address := getNodeAddress(nodeID, port)
 
 	gossip := store.NewGossip(nodeID, address, 3*time.Second, 3)
