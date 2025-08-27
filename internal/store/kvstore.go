@@ -171,6 +171,7 @@ func (kv *KeyValueStore) Put(key, value string) {
 		}
 		vc := kv.putLocal(key, value)
 		kv.Gossip.sendPutToNode(vnode, key, value, vc)
+
 		return
 	}
 
@@ -204,6 +205,7 @@ func (kv *KeyValueStore) putLocal(key, value string) *vectorclock.VectorClock {
 		vc = item.VectorClock
 	} else {
 		vc = vectorclock.NewVectorClock()
+
 		vc.Increment(kv.Gossip.Self.ID)
 		kv.Data[key] = &DataItem{Value: value, VectorClock: vc}
 		log.Printf("Stored key %s with initial VectorClock: %s", key, vc.String())
