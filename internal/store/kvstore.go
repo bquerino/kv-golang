@@ -153,60 +153,71 @@ func (kv *KeyValueStore) writeDataToDisk(key, value string) {
 }
 
 func (kv *KeyValueStore) Put(key, value string) {
-	kv.Mutex.Lock()
-	defer kv.Mutex.Unlock()
-
 	vnode := kv.ConsistentHash.GetNode(key)
 
-	// Se o nó responsável pela chave está offline, fazer hinted handoff
-	if !kv.Gossip.IsNodeAlive(vnode.ID) {
-		log.Printf("Node %s is down. Storing hinted handoff for key %s", vnode.ID, key)
-		kv.HintedData[key] = &Hint{
-			Key:       key,
-			Value:     value,
-			TargetID:  vnode.ID,
-			Timestamp: time.Now(),
+	// Se o nó responsável não for o atual, envia para o nó correto
+	if vnode.ID != kv.Gossip.Self.ID {
+		if !kv.Gossip.IsNodeAlive(vnode.ID) {
+			kv.Mutex.Lock()
+			log.Printf("Node %s is down. Storing hinted handoff for key %s", vnode.ID, key)
+			kv.HintedData[key] = &Hint{
+				Key:       key,
+				Value:     value,
+				TargetID:  vnode.ID,
+				Timestamp: time.Now(),
+			}
+			kv.Mutex.Unlock()
+			return
 		}
+		kv.Gossip.sendPutToNode(vnode, key, value)
 		return
 	}
 
-	// Se a chave já existe, faz merge dos vector clocks
-	if item, exists := kv.Data[key]; exists {
-		item.VectorClock.Increment(kv.Gossip.Self.ID) // Incrementa o Vector Clock local
-		log.Printf("Updated key %s with new value. VectorClock: %s", key, item.VectorClock.String())
-		item.Value = value
-	} else {
-		// Se for um novo dado, cria um Vector Clock e adiciona
-		vc := vectorclock.NewVectorClock()
-		vc.Increment(kv.Gossip.Self.ID)
-		kv.Data[key] = &DataItem{
-			Value:       value,
-			VectorClock: vc,
-		}
-		log.Printf("Stored key %s with initial VectorClock: %s", key, vc.String())
-	}
-
-	// Persistir o dado no disco usando páginas
-	kv.writeDataToDisk(key, value)
+	kv.putLocal(key, value)
 }
 
 func (kv *KeyValueStore) Get(key string) (string, *vectorclock.VectorClock, bool) {
+	vnode := kv.ConsistentHash.GetNode(key)
+
+	if vnode.ID != kv.Gossip.Self.ID {
+		if !kv.Gossip.IsNodeAlive(vnode.ID) {
+			log.Printf("Node %s is down. Key %s might be in hinted handoff.", vnode.ID, key)
+			return "", nil, false
+		}
+		return kv.Gossip.sendGetToNode(vnode, key)
+	}
+
+	return kv.getLocal(key)
+}
+
+// putLocal armazena a chave localmente
+func (kv *KeyValueStore) putLocal(key, value string) {
 	kv.Mutex.Lock()
 	defer kv.Mutex.Unlock()
 
-	vnode := kv.ConsistentHash.GetNode(key)
-
-	// Verifica se o nó responsável está online
-	if kv.Gossip.IsNodeAlive(vnode.ID) {
-		if item, exists := kv.Data[key]; exists {
-			return item.Value, item.VectorClock, true
-		}
-		log.Printf("Key %s not found in node %s", key, vnode.ID)
+	if item, exists := kv.Data[key]; exists {
+		item.VectorClock.Increment(kv.Gossip.Self.ID)
+		log.Printf("Updated key %s with new value. VectorClock: %s", key, item.VectorClock.String())
+		item.Value = value
 	} else {
-		log.Printf("Node %s is down. Key %s might be in hinted handoff.", vnode.ID, key)
+		vc := vectorclock.NewVectorClock()
+		vc.Increment(kv.Gossip.Self.ID)
+		kv.Data[key] = &DataItem{Value: value, VectorClock: vc}
+		log.Printf("Stored key %s with initial VectorClock: %s", key, vc.String())
 	}
 
-	// Se não estiver na memória, tenta carregar do disco
+	kv.writeDataToDisk(key, value)
+}
+
+// getLocal retorna o valor armazenado localmente
+func (kv *KeyValueStore) getLocal(key string) (string, *vectorclock.VectorClock, bool) {
+	kv.Mutex.Lock()
+	defer kv.Mutex.Unlock()
+
+	if item, exists := kv.Data[key]; exists {
+		return item.Value, item.VectorClock, true
+	}
+
 	value, found := kv.readDataFromDisk(key)
 	if found {
 		return value, nil, true

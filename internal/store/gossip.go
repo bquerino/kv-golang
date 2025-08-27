@@ -1,9 +1,11 @@
 package store
 
 import (
+	"bufio"
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,6 +43,10 @@ func NewGossip(selfID, address string, interval time.Duration, vNodes int) *Goss
 		Interval:       interval,
 		ConsistentHash: NewConsistentHashing(vNodes),
 	}
+
+	// Adiciona o próprio nó à lista e ao anel de hash consistente
+	gossip.Nodes[selfID] = self
+	gossip.ConsistentHash.AddNode(self)
 
 	// Inicializa o KeyValueStore integrado com o Gossip e PageManager
 	gossip.KeyValueStore, _ = NewKeyValueStore(gossip, gossip.ConsistentHash, 5*time.Second, "data_pages.db")
@@ -117,22 +123,77 @@ func (g *Gossip) sendMessage(node *Node) {
 	fmt.Fprintf(conn, "PING from %s\n", g.Self.ID)
 }
 
-// Lida com uma conexão recebida (PING de outro nó)
+// Lida com uma conexão recebida (PING ou operações de dados)
 func (g *Gossip) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
-	var nodeID string
-	fmt.Fscanf(conn, "PING from %s\n", &nodeID)
+	reader := bufio.NewReader(conn)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		log.Printf("Error reading connection: %v", err)
+		return
+	}
 
-	g.Mutex.Lock()
-	defer g.Mutex.Unlock()
+	parts := strings.Fields(strings.TrimSpace(line))
+	if len(parts) == 0 {
+		return
+	}
 
-	if node, exists := g.Nodes[nodeID]; exists {
-		node.LastCheck = time.Now()
-		node.Alive = true
-		log.Printf("Received PING from node %s", node.ID)
-	} else {
-		log.Printf("Unknown node: %s", nodeID)
+	switch parts[0] {
+	case "PING":
+		if len(parts) < 3 {
+			return
+		}
+		nodeID := parts[2]
+		g.Mutex.Lock()
+		if node, exists := g.Nodes[nodeID]; exists {
+			node.LastCheck = time.Now()
+			node.Alive = true
+			log.Printf("Received PING from node %s", node.ID)
+		} else {
+			log.Printf("Unknown node: %s", nodeID)
+		}
+		g.Mutex.Unlock()
+	case "PUT":
+		if len(parts) < 3 {
+			return
+		}
+		key := parts[1]
+		value := parts[2]
+		g.KeyValueStore.putLocal(key, value)
+	case "GET":
+		if len(parts) < 2 {
+			return
+		}
+		key := parts[1]
+		value, _, found := g.KeyValueStore.getLocal(key)
+		if found {
+			fmt.Fprintf(conn, "VALUE %s\n", value)
+		} else {
+			fmt.Fprintf(conn, "NOTFOUND\n")
+		}
+	case "ELECTION":
+		if len(parts) >= 3 {
+			nodeID := parts[2]
+			g.Mutex.Lock()
+			if node, exists := g.Nodes[nodeID]; exists {
+				node.LastCheck = time.Now()
+				node.Alive = true
+			}
+			g.Mutex.Unlock()
+			fmt.Fprintf(conn, "OK\n")
+		}
+	case "COORDINATOR":
+		if len(parts) >= 2 {
+			coordID := parts[1]
+			g.Mutex.Lock()
+			if node, exists := g.Nodes[coordID]; exists {
+				g.Coordinator = node
+			}
+			g.Mutex.Unlock()
+		}
+	default:
+		log.Printf("Unknown message: %s", line)
 	}
 }
 
@@ -288,4 +349,44 @@ func (g *Gossip) PrintNodes() {
 		}
 		log.Printf("Node: %s, Address: %s, Status: %s", id, node.Address, status)
 	}
+}
+
+// Envia uma operação PUT para outro nó responsável pela chave
+func (g *Gossip) sendPutToNode(node *Node, key, value string) {
+	conn, err := net.Dial("tcp", node.Address)
+	if err != nil {
+		log.Printf("Error sending PUT to node %s: %v", node.ID, err)
+		g.markNodeDead(node)
+		return
+	}
+	defer conn.Close()
+
+	fmt.Fprintf(conn, "PUT %s %s\n", key, value)
+}
+
+// Envia uma operação GET para outro nó e retorna o resultado
+func (g *Gossip) sendGetToNode(node *Node, key string) (string, *vectorclock.VectorClock, bool) {
+	conn, err := net.Dial("tcp", node.Address)
+	if err != nil {
+		log.Printf("Error sending GET to node %s: %v", node.ID, err)
+		g.markNodeDead(node)
+		return "", nil, false
+	}
+	defer conn.Close()
+
+	fmt.Fprintf(conn, "GET %s\n", key)
+
+	resp, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		log.Printf("Error reading GET response from node %s: %v", node.ID, err)
+		return "", nil, false
+	}
+
+	resp = strings.TrimSpace(resp)
+	if strings.HasPrefix(resp, "VALUE ") {
+		value := strings.TrimPrefix(resp, "VALUE ")
+		return value, nil, true
+	}
+
+	return "", nil, false
 }
