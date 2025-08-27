@@ -169,7 +169,9 @@ func (kv *KeyValueStore) Put(key, value string) {
 			kv.Mutex.Unlock()
 			return
 		}
-		kv.Gossip.sendPutToNode(vnode, key, value)
+		vc := kv.putLocal(key, value)
+		kv.Gossip.sendPutToNode(vnode, key, value, vc)
+
 		return
 	}
 
@@ -191,22 +193,26 @@ func (kv *KeyValueStore) Get(key string) (string, *vectorclock.VectorClock, bool
 }
 
 // putLocal armazena a chave localmente
-func (kv *KeyValueStore) putLocal(key, value string) {
+func (kv *KeyValueStore) putLocal(key, value string) *vectorclock.VectorClock {
 	kv.Mutex.Lock()
 	defer kv.Mutex.Unlock()
 
+	var vc *vectorclock.VectorClock
 	if item, exists := kv.Data[key]; exists {
 		item.VectorClock.Increment(kv.Gossip.Self.ID)
 		log.Printf("Updated key %s with new value. VectorClock: %s", key, item.VectorClock.String())
 		item.Value = value
+		vc = item.VectorClock
 	} else {
-		vc := vectorclock.NewVectorClock()
+		vc = vectorclock.NewVectorClock()
+
 		vc.Increment(kv.Gossip.Self.ID)
 		kv.Data[key] = &DataItem{Value: value, VectorClock: vc}
 		log.Printf("Stored key %s with initial VectorClock: %s", key, vc.String())
 	}
 
 	kv.writeDataToDisk(key, value)
+	return vc
 }
 
 // getLocal retorna o valor armazenado localmente

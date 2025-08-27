@@ -2,6 +2,8 @@ package vectorclock
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 )
 
 type VectorClock struct {
@@ -68,4 +70,34 @@ func (vc *VectorClock) Compare(other *VectorClock) int {
 // Retorna uma string que representa o estado atual do VectorClock
 func (vc *VectorClock) String() string {
 	return fmt.Sprintf("%v", vc.Clock)
+}
+
+// Serialize converte o VectorClock em uma string no formato node:counter,node:counter
+func (vc *VectorClock) Serialize() string {
+	parts := make([]string, 0, len(vc.Clock))
+	for node, counter := range vc.Clock {
+		parts = append(parts, fmt.Sprintf("%s:%d", node, counter))
+	}
+	return strings.Join(parts, ",")
+}
+
+// Deserialize cria um VectorClock a partir da representação em string
+func Deserialize(s string) *VectorClock {
+	vc := NewVectorClock()
+	if s == "" {
+		return vc
+	}
+	pairs := strings.Split(s, ",")
+	for _, p := range pairs {
+		elems := strings.SplitN(p, ":", 2)
+		if len(elems) != 2 {
+			continue
+		}
+		c, err := strconv.Atoi(elems[1])
+		if err != nil {
+			continue
+		}
+		vc.Clock[elems[0]] = c
+	}
+	return vc
 }

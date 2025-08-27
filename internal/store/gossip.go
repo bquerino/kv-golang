@@ -160,15 +160,28 @@ func (g *Gossip) handleConnection(conn net.Conn) {
 		}
 		key := parts[1]
 		value := parts[2]
-		g.KeyValueStore.putLocal(key, value)
+
+		if len(parts) >= 4 {
+			vc := vectorclock.Deserialize(parts[3])
+			g.KeyValueStore.ResolveConflicts(key, value, vc)
+		} else {
+			g.KeyValueStore.putLocal(key, value)
+		}
+
 	case "GET":
 		if len(parts) < 2 {
 			return
 		}
 		key := parts[1]
-		value, _, found := g.KeyValueStore.getLocal(key)
+
+		value, vc, found := g.KeyValueStore.getLocal(key)
 		if found {
-			fmt.Fprintf(conn, "VALUE %s\n", value)
+			vcStr := ""
+			if vc != nil {
+				vcStr = vc.Serialize()
+			}
+			fmt.Fprintf(conn, "VALUE %s %s\n", value, vcStr)
+
 		} else {
 			fmt.Fprintf(conn, "NOTFOUND\n")
 		}
@@ -352,7 +365,9 @@ func (g *Gossip) PrintNodes() {
 }
 
 // Envia uma operação PUT para outro nó responsável pela chave
-func (g *Gossip) sendPutToNode(node *Node, key, value string) {
+
+func (g *Gossip) sendPutToNode(node *Node, key, value string, vc *vectorclock.VectorClock) {
+
 	conn, err := net.Dial("tcp", node.Address)
 	if err != nil {
 		log.Printf("Error sending PUT to node %s: %v", node.ID, err)
@@ -361,7 +376,8 @@ func (g *Gossip) sendPutToNode(node *Node, key, value string) {
 	}
 	defer conn.Close()
 
-	fmt.Fprintf(conn, "PUT %s %s\n", key, value)
+	fmt.Fprintf(conn, "PUT %s %s %s\n", key, value, vc.Serialize())
+
 }
 
 // Envia uma operação GET para outro nó e retorna o resultado
@@ -383,9 +399,16 @@ func (g *Gossip) sendGetToNode(node *Node, key string) (string, *vectorclock.Vec
 	}
 
 	resp = strings.TrimSpace(resp)
-	if strings.HasPrefix(resp, "VALUE ") {
-		value := strings.TrimPrefix(resp, "VALUE ")
-		return value, nil, true
+
+	parts := strings.Fields(resp)
+	if len(parts) >= 2 && parts[0] == "VALUE" {
+		value := parts[1]
+		var vc *vectorclock.VectorClock
+		if len(parts) >= 3 {
+			vc = vectorclock.Deserialize(parts[2])
+		}
+		return value, vc, true
+
 	}
 
 	return "", nil, false
