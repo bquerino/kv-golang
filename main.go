@@ -38,21 +38,34 @@ func main() {
 	runCLI(gossip)
 }
 
+// getNodeAddress retorna o endereço completo de um nó. O hostname pode ser
+// sobrescrito via variável de ambiente <NODE>_HOST (ex: NODE1_HOST), permitindo
+// que cada instância aponte para o host correto em ambientes distribuídos.
+func getNodeAddress(id, port string) string {
+	host := os.Getenv(strings.ToUpper(id) + "_HOST")
+	if host == "" {
+		host = id
+	}
+	return fmt.Sprintf("%s:%s", host, port)
+}
+
 func initializeCluster(nodeID, port string) (*store.Gossip, error) {
-	address := fmt.Sprintf("localhost:%s", port)
+	// Usa o nodeID como hostname para permitir comunicacao entre os nos
+	address := getNodeAddress(nodeID, port)
 
 	gossip := store.NewGossip(nodeID, address, 3*time.Second, 3)
 
-	// Adicionar todos os nós ao cluster
-	if nodeID == "node1" {
-		gossip.AddNode("node2", "localhost:8082")
-		gossip.AddNode("node3", "localhost:8083")
-	} else if nodeID == "node2" {
-		gossip.AddNode("node1", "localhost:8081")
-		gossip.AddNode("node3", "localhost:8083")
-	} else if nodeID == "node3" {
-		gossip.AddNode("node1", "localhost:8081")
-		gossip.AddNode("node2", "localhost:8082")
+	// Adiciona os outros nós ao cluster
+	nodes := map[string]string{
+		"node1": getNodeAddress("node1", "8081"),
+		"node2": getNodeAddress("node2", "8082"),
+		"node3": getNodeAddress("node3", "8083"),
+	}
+
+	for id, addr := range nodes {
+		if id != nodeID {
+			gossip.AddNode(id, addr)
+		}
 	}
 
 	return gossip, nil
