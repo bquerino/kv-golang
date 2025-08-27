@@ -16,20 +16,24 @@ type DataItem struct {
 	VectorClock *vectorclock.VectorClock // Versão do dado
 }
 
+// Hint representa um item que precisa ser enviado a um nó que estava
+// indisponível no momento da escrita original. Além do valor, também
+// carregamos o VectorClock para garantir conciliação quando o nó voltar.
 type Hint struct {
-	Key       string
-	Value     string
-	TargetID  string // O nó que deveria receber o dado originalmente
-	Timestamp time.Time
+	Key         string
+	Value       string
+	TargetID    string // O nó que deveria receber o dado originalmente
+	Timestamp   time.Time
+	VectorClock *vectorclock.VectorClock
 }
 
 // KeyValueStore gerencia os dados e lida com escrita em disco, reconciliação, e hinted handoff
 type KeyValueStore struct {
-	Data            map[string]*DataItem // Armazena os dados na memória
-	HintedData      map[string]*Hint     // Armazena dados para hinted handoff
-	PageManager     *PageManager         // Gerenciamento de páginas para escrita em disco
-	Gossip          *Gossip              // Integração com o protocolo Gossip
-	ConsistentHash  *ConsistentHashing   // Integração com Consistent Hashing
+	Data            map[string]*DataItem        // Armazena os dados na memória
+	HintedData      map[string]map[string]*Hint // Armazena dados para hinted handoff
+	PageManager     *PageManager                // Gerenciamento de páginas para escrita em disco
+	Gossip          *Gossip                     // Integração com o protocolo Gossip
+	ConsistentHash  *ConsistentHashing          // Integração com Consistent Hashing
 	Mutex           sync.Mutex
 	HandoffInterval time.Duration // Intervalo para verificar hinted handoff
 }
@@ -57,7 +61,7 @@ func NewKeyValueStore(gossip *Gossip, consistentHash *ConsistentHashing, handoff
 
 	return &KeyValueStore{
 		Data:            make(map[string]*DataItem),
-		HintedData:      make(map[string]*Hint),
+		HintedData:      make(map[string]map[string]*Hint),
 		PageManager:     pageManager,
 		Gossip:          gossip,
 		ConsistentHash:  consistentHash,
@@ -152,33 +156,56 @@ func (kv *KeyValueStore) writeDataToDisk(key, value string) {
 	}
 }
 
+// Put armazena a chave localmente e propaga a atualização para todos os nós
+// conhecidos. Caso algum nó esteja indisponível, o valor é guardado em
+// HintedData para posterior entrega.
 func (kv *KeyValueStore) Put(key, value string) {
-	vnode := kv.ConsistentHash.GetNode(key)
-
-	// Se o nó responsável não for o atual, envia para o nó correto
-	if vnode.ID != kv.Gossip.Self.ID {
-		if !kv.Gossip.IsNodeAlive(vnode.ID) {
-			kv.Mutex.Lock()
-			log.Printf("Node %s is down. Storing hinted handoff for key %s", vnode.ID, key)
-			kv.HintedData[key] = &Hint{
-				Key:       key,
-				Value:     value,
-				TargetID:  vnode.ID,
-				Timestamp: time.Now(),
-			}
-			kv.Mutex.Unlock()
-			return
-		}
-		vc := kv.putLocal(key, value)
-		kv.Gossip.sendPutToNode(vnode, key, value, vc)
-
-		return
-	}
-
-	kv.putLocal(key, value)
+	vc := kv.putLocal(key, value)
+	kv.broadcastPut(key, value, vc)
 }
 
+// broadcastPut envia a operação PUT para todos os nós exceto o próprio
+// processando hinted handoff quando necessário.
+func (kv *KeyValueStore) broadcastPut(key, value string, vc *vectorclock.VectorClock) {
+	for id, node := range kv.Gossip.Nodes {
+		if id == kv.Gossip.Self.ID {
+			continue
+		}
+
+		if !kv.Gossip.IsNodeAlive(id) {
+			log.Printf("Node %s is down. Storing hinted handoff for key %s", id, key)
+			kv.addHint(key, value, vc, id)
+			continue
+		}
+
+		kv.Gossip.sendPutToNode(node, key, value, vc)
+	}
+}
+
+func (kv *KeyValueStore) addHint(key, value string, vc *vectorclock.VectorClock, targetID string) {
+	kv.Mutex.Lock()
+	defer kv.Mutex.Unlock()
+	if _, ok := kv.HintedData[key]; !ok {
+		kv.HintedData[key] = make(map[string]*Hint)
+	}
+	kv.HintedData[key][targetID] = &Hint{
+		Key:         key,
+		Value:       value,
+		TargetID:    targetID,
+		Timestamp:   time.Now(),
+		VectorClock: vc,
+	}
+}
+
+// Get tenta primeiro recuperar o valor localmente. Caso não exista, envia uma
+// requisição ao nó responsável pela chave. Esse caminho adicional garante que
+// todos os nós possam responder leituras mesmo que o responsável esteja
+// indisponível.
 func (kv *KeyValueStore) Get(key string) (string, *vectorclock.VectorClock, bool) {
+	if value, vc, found := kv.getLocal(key); found {
+		return value, vc, true
+	}
+
 	vnode := kv.ConsistentHash.GetNode(key)
 
 	if vnode.ID != kv.Gossip.Self.ID {
@@ -189,7 +216,7 @@ func (kv *KeyValueStore) Get(key string) (string, *vectorclock.VectorClock, bool
 		return kv.Gossip.sendGetToNode(vnode, key)
 	}
 
-	return kv.getLocal(key)
+	return "", nil, false
 }
 
 // putLocal armazena a chave localmente
@@ -265,15 +292,20 @@ func (kv *KeyValueStore) processHintedHandoff() {
 	kv.Mutex.Lock()
 	defer kv.Mutex.Unlock()
 
-	for key, hint := range kv.HintedData {
-		if kv.Gossip.IsNodeAlive(hint.TargetID) {
-			log.Printf("Reapplying hinted handoff for key %s to node %s", key, hint.TargetID)
-			kv.Data[key] = &DataItem{
-				Value: hint.Value,
+	for key, hints := range kv.HintedData {
+		for targetID, hint := range hints {
+			if kv.Gossip.IsNodeAlive(targetID) {
+				log.Printf("Reapplying hinted handoff for key %s to node %s", key, targetID)
+				if node, ok := kv.Gossip.Nodes[targetID]; ok {
+					kv.Gossip.sendPutToNode(node, hint.Key, hint.Value, hint.VectorClock)
+				}
+				delete(hints, targetID)
+			} else {
+				log.Printf("Node %s still down, keeping hinted handoff for key %s", targetID, key)
 			}
-			delete(kv.HintedData, key) // Remove o hint após a transferência
-		} else {
-			log.Printf("Node %s still down, keeping hinted handoff for key %s", hint.TargetID, key)
+		}
+		if len(hints) == 0 {
+			delete(kv.HintedData, key)
 		}
 	}
 }

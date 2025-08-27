@@ -32,6 +32,9 @@ func main() {
 
 		// Iniciar servidor para ouvir conexões (GossipIn)
 		go gossip.GossipIn()
+
+		// Inicia o processo de hinted handoff em background
+		go gossip.KeyValueStore.StartHintedHandoff()
 	}
 
 	// CLI interativa
