@@ -25,8 +25,9 @@ docker-compose up --build -d
 
 O Nginx ficará exposto na porta **8080**, encaminhando o tráfego para os três nós. Para interagir com o cluster, utilize o cliente apontando para o load balancer:
 
+
 ```bash
-go run client.go localhost 8080
+go run ./cmd/client/main.go localhost 8080
 ```
 
 Assim, qualquer comando enviado será roteado para um dos nós do cluster automaticamente.
@@ -48,28 +49,32 @@ Para simular um ambiente distribuído com múltiplos nós, utilize o modo servid
 
 **Terminal 1: Rodar o Nó 1 (servidor)**
 
+
 ```bash
-go run server.go node1 8081
+go run ./cmd/server/main.go node1 8081
 ```
 
 **Terminal 2: Rodar o Nó 2 (servidor)**
 
+
 ```bash
-go run server.go node2 8082
+go run ./cmd/server/main.go node2 8082
 ```
 
 **Terminal 3: Rodar o Nó 3 (servidor)**
 
+
 ```bash
-go run server.go node3 8083
+go run ./cmd/server/main.go node3 8083
 ```
 
 ### 3. Usar o Cliente Interativo
 
 Abra um terminal separado e execute o cliente apontando para o nó desejado, troque a porta de acordo com o nó que deseja:
 
+
 ```bash
-go run client.go localhost 8081
+go run ./cmd/client/main.go localhost 8081
 ```
 
 Você pode trocar o endereço e porta para interagir com qualquer nó do cluster.
@@ -131,8 +136,8 @@ Se você rodar múltiplos nós e modificar os mesmos dados em diferentes nós, o
 
 ### 6. Estrutura do Código
 * **main.go**: Arquivo principal que inicia o servidor e integra os componentes.
-* **cmd/server.go**: Inicialização dos nós e configuração do cluster.
-* **cmd/client.go**: Cliente interativo para comandos PUT/GET/NODES.
+* **cmd/server/main.go**: Inicialização dos nós e configuração do cluster.
+* **cmd/client/main.go**: Cliente interativo para comandos PUT/GET/NODES.
 * **internal/store**:
     * **kvstore.go**: KV-Store distribuído, persistência, reconciliação e propagação de dados.
     * **gossip.go**: Gossip Protocol, roteamento, health check e propagação entre nós.
