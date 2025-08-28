@@ -3,7 +3,7 @@ package store
 import (
 	"bufio"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"strings"
 	"sync"
@@ -91,7 +91,7 @@ func (g *Gossip) GossipOut() {
 func (g *Gossip) GossipIn() {
 	listener, err := net.Listen("tcp", g.Self.Address)
 	if err != nil {
-		log.Printf("Error starting TCP server: %v", err)
+		slog.Error("Error starting TCP server", "err", err)
 		return
 	}
 
@@ -100,7 +100,7 @@ func (g *Gossip) GossipIn() {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			log.Printf("Error accepting connection: %v", err)
+			slog.Error("Error accepting connection", "err", err)
 			continue
 		}
 
@@ -112,14 +112,14 @@ func (g *Gossip) GossipIn() {
 func (g *Gossip) sendMessage(node *Node) {
 	conn, err := net.Dial("tcp", node.Address)
 	if err != nil {
-		log.Printf("Error connecting to node %s: %v", node.ID, err)
+		slog.Warn("Error connecting to node", "node", node.ID, "err", err)
 		g.markNodeDead(node)
 		return
 	}
 	defer conn.Close()
 
 	// Envia um ping simples
-	log.Printf("Sending PING to node %s", node.ID)
+	// slog.Debug("Sending PING", "node", node.ID) // Desabilitado para evitar ruído
 	fmt.Fprintf(conn, "PING from %s\n", g.Self.ID)
 }
 
@@ -130,16 +130,37 @@ func (g *Gossip) handleConnection(conn net.Conn) {
 	reader := bufio.NewReader(conn)
 	line, err := reader.ReadString('\n')
 	if err != nil {
-		log.Printf("Error reading connection: %v", err)
+		slog.Error("Error reading connection", "err", err)
 		return
 	}
 
+	if !strings.HasPrefix(line, "PING") {
+		slog.Info("[TCP] Comando recebido", "raw", line)
+	}
 	parts := strings.Fields(strings.TrimSpace(line))
+	slog.Info("[handleConnection] Parsed parts", "parts", parts)
 	if len(parts) == 0 {
+		slog.Warn("[handleConnection] Linha recebida vazia ou inválida", "raw", line)
 		return
 	}
 
-	switch parts[0] {
+	cmd := strings.ToUpper(parts[0])
+	slog.Info("[handleConnection] Comando identificado", "cmd", cmd, "parts", parts)
+
+	switch cmd {
+	case "NODES":
+		g.Mutex.Lock()
+		var nodesList []string
+		for id, node := range g.Nodes {
+			status := "alive"
+			if !node.Alive {
+				status = "dead"
+			}
+			nodesList = append(nodesList, fmt.Sprintf("%s:%s:%s", id, node.Address, status))
+		}
+		g.Mutex.Unlock()
+		fmt.Fprintf(conn, "NODES %s\n", strings.Join(nodesList, ", "))
+		return
 	case "PING":
 		if len(parts) < 3 {
 			return
@@ -149,24 +170,28 @@ func (g *Gossip) handleConnection(conn net.Conn) {
 		if node, exists := g.Nodes[nodeID]; exists {
 			node.LastCheck = time.Now()
 			node.Alive = true
-			log.Printf("Received PING from node %s", node.ID)
+			// slog.Debug("Received PING", "node", node.ID) // Desabilitado para evitar ruído
 		} else {
-			log.Printf("Unknown node: %s", nodeID)
+			slog.Warn("Unknown node", "node", nodeID)
 		}
 		g.Mutex.Unlock()
 	case "PUT":
 		if len(parts) < 3 {
+			slog.Warn("[handleConnection] PUT recebido com argumentos insuficientes", "parts", parts)
 			return
 		}
 		key := parts[1]
 		value := parts[2]
-
+		slog.Info("[handleConnection] PUT recebido para processamento", "key", key, "value", value, "parts", parts)
 		if len(parts) >= 4 {
 			vc := vectorclock.Deserialize(parts[3])
+			slog.Info("[handleConnection] PUT com VectorClock propagado", "key", key, "vc", vc.String())
 			g.KeyValueStore.ResolveConflicts(key, value, vc)
 		} else {
-			g.KeyValueStore.putLocal(key, value)
+			g.Put(key, value)
 		}
+		// Responde ao client que o dado foi armazenado
+		fmt.Fprintf(conn, "STORED\n")
 
 	case "GET":
 		if len(parts) < 2 {
@@ -206,7 +231,7 @@ func (g *Gossip) handleConnection(conn net.Conn) {
 			g.Mutex.Unlock()
 		}
 	default:
-		log.Printf("Unknown message: %s", line)
+		slog.Warn("Unknown message", "msg", line)
 	}
 }
 
@@ -216,9 +241,9 @@ func (g *Gossip) markNodeDead(node *Node) {
 	defer g.Mutex.Unlock()
 
 	node.Alive = false
-	log.Printf("Node %s is marked as dead", node.ID)
+	slog.Warn("Node is marked as dead", "node", node.ID)
 	if g.Coordinator != nil && g.Coordinator.ID == node.ID {
-		log.Printf("Coordinator %s is down! Initiating election.", node.ID)
+		slog.Warn("Coordinator is down! Initiating election.", "coordinator", node.ID)
 		go g.initiateElection()
 	}
 }
@@ -233,7 +258,7 @@ func (g *Gossip) StartGossip() {
 
 // Função que inicia uma eleição quando o coordenador falha
 func (g *Gossip) initiateElection() {
-	log.Println("Starting election...")
+	slog.Info("Starting election...")
 
 	g.Mutex.Lock()
 	defer g.Mutex.Unlock()
@@ -266,27 +291,27 @@ func (g *Gossip) getHigherNodes() []*Node {
 func (g *Gossip) sendElectionMessage(node *Node) {
 	conn, err := net.Dial("tcp", node.Address)
 	if err != nil {
-		log.Printf("Error connecting to node %s during election: %v", node.ID, err)
+		slog.Error("[Election] Falha ao conectar para eleição", "node", node.ID, "err", err)
 		g.markNodeDead(node)
 		return
 	}
 	defer conn.Close()
 
-	log.Printf("Sending ELECTION message to node %s", node.ID)
+	slog.Info("[Election] Enviando mensagem de eleição", "node", node.ID)
 	fmt.Fprintf(conn, "ELECTION from %s\n", g.Self.ID)
 
 	// Espera resposta de "OK"
 	var response string
 	fmt.Fscanf(conn, "%s\n", &response)
 	if response == "OK" {
-		log.Printf("Node %s responded to election", node.ID)
+		slog.Info("[Election] Nó respondeu OK", "node", node.ID)
 		return
 	}
 }
 
 // Define o nó atual como coordenador
 func (g *Gossip) becomeCoordinator() {
-	log.Println("Becoming the coordinator.")
+	slog.Info("Becoming the coordinator.")
 	g.Coordinator = g.Self
 
 	// Anuncia para todos os nós que este nó é o novo coordenador
@@ -307,13 +332,13 @@ func (g *Gossip) announceCoordinator() {
 func (g *Gossip) sendCoordinatorMessage(node *Node) {
 	conn, err := net.Dial("tcp", node.Address)
 	if err != nil {
-		log.Printf("Error connecting to node %s to announce coordinator: %v", node.ID, err)
+		slog.Warn("Error connecting to node to announce coordinator", "node", node.ID, "err", err)
 		g.markNodeDead(node)
 		return
 	}
 	defer conn.Close()
 
-	log.Printf("Announcing self as COORDINATOR to node %s", node.ID)
+	slog.Debug("Announcing self as COORDINATOR", "node", node.ID)
 	fmt.Fprintf(conn, "COORDINATOR %s\n", g.Self.ID)
 }
 
@@ -345,9 +370,8 @@ func (g *Gossip) Get(key string) (string, *vectorclock.VectorClock, bool) {
 
 // Envia um DELETE para o KeyValueStore (implementar no KeyValueStore, se ainda não estiver feito)
 func (g *Gossip) Delete(key string) {
-	// Adicione o método Delete no KeyValueStore para lidar com a remoção de chaves
-	// g.KeyValueStore.Delete(key)
-	log.Println("Delete operation is not yet implemented in KeyValueStore.")
+	// Método Delete não implementado
+	slog.Warn("Delete operation is not yet implemented in KeyValueStore.")
 }
 
 // Imprime os nós ativos no cluster
@@ -360,41 +384,58 @@ func (g *Gossip) PrintNodes() {
 		if !node.Alive {
 			status = "dead"
 		}
-		log.Printf("Node: %s, Address: %s, Status: %s", id, node.Address, status)
+		slog.Info("Node status", "node", id, "address", node.Address, "status", status)
 	}
 }
 
 // Envia uma operação PUT para outro nó responsável pela chave
 
-func (g *Gossip) sendPutToNode(node *Node, key, value string, vc *vectorclock.VectorClock) {
-
+func (g *Gossip) sendPutToNode(node *Node, key, value string, vc *vectorclock.VectorClock) error {
 	conn, err := net.Dial("tcp", node.Address)
 	if err != nil {
-		log.Printf("Error sending PUT to node %s: %v", node.ID, err)
+		slog.Error("[sendPutToNode] Falha ao conectar para PUT", "node", node.ID, "err", err)
 		g.markNodeDead(node)
-		return
+		return err
 	}
 	defer conn.Close()
 
-	fmt.Fprintf(conn, "PUT %s %s %s\n", key, value, vc.Serialize())
+	slog.Info("[sendPutToNode] Enviando PUT", "node", node.ID, "key", key, "value", value, "vc", vc.String())
+	_, err = fmt.Fprintf(conn, "PUT %s %s %s\n", key, value, vc.Serialize())
+	if err != nil {
+		slog.Error("[sendPutToNode] Falha ao escrever PUT", "node", node.ID, "err", err)
+		return err
+	}
 
+	// Ler resposta do nó remoto
+	resp, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		slog.Error("[sendPutToNode] Falha ao ler resposta do nó remoto", "node", node.ID, "err", err)
+		return err
+	}
+	resp = strings.TrimSpace(resp)
+	if resp == "STORED" {
+		slog.Info("[sendPutToNode] PUT confirmado pelo nó remoto", "node", node.ID, "key", key)
+		return nil
+	} else {
+		slog.Warn("[sendPutToNode] PUT não confirmado pelo nó remoto", "node", node.ID, "key", key, "resp", resp)
+		return fmt.Errorf("PUT não confirmado: %s", resp)
+	}
 }
 
 // Envia uma operação GET para outro nó e retorna o resultado
 func (g *Gossip) sendGetToNode(node *Node, key string) (string, *vectorclock.VectorClock, bool) {
 	conn, err := net.Dial("tcp", node.Address)
 	if err != nil {
-		log.Printf("Error sending GET to node %s: %v", node.ID, err)
+		slog.Warn("Error sending GET to node", "node", node.ID, "err", err)
 		g.markNodeDead(node)
 		return "", nil, false
 	}
 	defer conn.Close()
-
 	fmt.Fprintf(conn, "GET %s\n", key)
 
 	resp, err := bufio.NewReader(conn).ReadString('\n')
 	if err != nil {
-		log.Printf("Error reading GET response from node %s: %v", node.ID, err)
+		slog.Warn("Error reading GET response from node", "node", node.ID, "err", err)
 		return "", nil, false
 	}
 

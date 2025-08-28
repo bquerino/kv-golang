@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"log/slog"
 	"os"
 	"time"
 
@@ -9,13 +10,19 @@ import (
 )
 
 func main() {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	slog.SetDefault(logger)
+	runServer()
+}
+
+func runServer() {
 	if len(os.Args) < 3 {
 		log.Fatalf("Usage: server <nodeID> <port>")
 	}
 
 	nodeID := os.Args[1]
 	port := os.Args[2]
-	address := nodeID + ":" + port // Use nome do serviço Docker Compose
+	address := nodeID + ":" + port // Use o nome do serviço Docker Compose
 
 	gossip := store.NewGossip(nodeID, address, 3*time.Second, 3)
 

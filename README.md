@@ -20,21 +20,18 @@ Este projeto implementa um KV-Store (Key-Value Store) distribuído usando Go, co
 É possível levantar três nós da aplicação e um balanceador de carga Nginx usando o Docker Compose incluso neste repositório:
 
 ```bash
-docker compose up -d
+docker-compose up --build -d
 ```
 
-O Nginx ficará exposto na porta **8080**, encaminhando o tráfego para os três nós. Para interagir com o cluster via CLI, abra um shell em um dos nós e utilize o modo `--cli-only`:
+O Nginx ficará exposto na porta **8080**, encaminhando o tráfego para os três nós. Para interagir com o cluster, utilize o cliente apontando para o load balancer:
 
 ```bash
-docker compose exec node1 sh -c "printf 'put chave valor\nexit\n' | kv-g --port 8081 --id node1 --cli-only"
+go run client.go localhost 8080
 ```
 
-Substitua `node1` por `node2` ou `node3` para enviar comandos a outros nós.
+Assim, qualquer comando enviado será roteado para um dos nós do cluster automaticamente.
 
-> Nota: por padrão os nós utilizam `localhost` como hostname para facilitar a execução local.
-> Em ambientes distribuídos, defina as variáveis de ambiente `NODE1_HOST`, `NODE2_HOST` e `NODE3_HOST` para apontar para os hosts corretos.
-
-## Como Testar o Projeto
+## Como Testar o Projeto sem Docker
 
 ### 1. Clonar o Repositório
 
@@ -47,41 +44,43 @@ cd kv-golang
 
 ### 2. Executar Múltiplos Nós
 
-Para simular um ambiente distribuído com múltiplos nós, você precisará abrir diferentes terminais para rodar as instâncias.
+Para simular um ambiente distribuído com múltiplos nós, utilize o modo servidor para cada instância:
 
-> Para fins de desenvolvimento o padrão irá logar a comunicação entre nós. Portanto use o argumento --cli-only após os comandos abaixo.
-
-**Terminal 1: Rodar o Nó 1**
-
-Abra o primeiro terminal e execute o nó 1:
+**Terminal 1: Rodar o Nó 1 (servidor)**
 
 ```bash
-go run main.go --port=8081 --id=node1
+go run server.go node1 8081
 ```
 
-**Terminal 2: Rodar o Nó 2**
-
-No segundo terminal, você pode rodar o nó 2:
+**Terminal 2: Rodar o Nó 2 (servidor)**
 
 ```bash
-go run main.go --port=8082 --id=node2
+go run server.go node2 8082
 ```
 
-**Terminal 3: Rodar o Nó 3**
-
-No terceiro terminal, você pode rodar o nó 3:
+**Terminal 3: Rodar o Nó 3 (servidor)**
 
 ```bash
-go run main.go --port=8083 --id=node3
+go run server.go node3 8083
 ```
 
-**Rodar os nós em modo CLI**
+### 3. Usar o Cliente Interativo
 
-Altere o número do nó para 1, 2 ou 3 e a porta 8081, 8082 ou 8083.
+Abra um terminal separado e execute o cliente apontando para o nó desejado, troque a porta de acordo com o nó que deseja:
 
 ```bash
-go run main.go --port=8083 --id=node3 --cli-only
+go run client.go localhost 8081
 ```
+
+Você pode trocar o endereço e porta para interagir com qualquer nó do cluster.
+
+No cliente, use os comandos:
+
+- `put chave valor` — armazena uma chave/valor
+- `get chave` — consulta uma chave
+<!-- O comando delete ainda não está implementado -->
+- `nodes` — lista os nós ativos
+- `exit` — encerra o cliente
 
 
 ### 3. Usar os Comandos Interativos no Console
@@ -131,11 +130,14 @@ Se você rodar múltiplos nós e modificar os mesmos dados em diferentes nós, o
 * O sistema irá reconciliar automaticamente os valores entre os nós usando Vector Clocks.
 
 ### 6. Estrutura do Código
-* **main.go**: Arquivo principal que inicia os nós e permite a interação via console.
+* **main.go**: Arquivo principal que inicia o servidor e integra os componentes.
+* **cmd/server.go**: Inicialização dos nós e configuração do cluster.
+* **cmd/client.go**: Cliente interativo para comandos PUT/GET/NODES.
 * **internal/store**:
-    * **kvstore.go**: Implementação principal do KV-Store, incluindo persistência e lógica de reconciliação de dados.
-    * **gossip.go**: Implementação do Gossip Protocol para comunicação entre os nós.
-    * **persistence.go**: Funções auxiliares para salvar e carregar dados do disco.
+    * **kvstore.go**: KV-Store distribuído, persistência, reconciliação e propagação de dados.
+    * **gossip.go**: Gossip Protocol, roteamento, health check e propagação entre nós.
+    * **hashing.go**: Consistent Hashing para distribuição de chaves.
+    * **vectorclock/**: Lógica de Vector Clocks para conciliação de versões.
 
 ### 7. Referências
 

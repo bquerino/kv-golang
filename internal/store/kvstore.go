@@ -1,8 +1,9 @@
 package store
 
 import (
-	"log"
+	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,7 +32,7 @@ type Hint struct {
 type KeyValueStore struct {
 	Data            map[string]*DataItem        // Armazena os dados na memória
 	HintedData      map[string]map[string]*Hint // Armazena dados para hinted handoff
-	PageManager     *PageManager                // Gerenciamento de páginas para escrita em disco
+	LogFile         *os.File                    // Arquivo de log append-only
 	Gossip          *Gossip                     // Integração com o protocolo Gossip
 	ConsistentHash  *ConsistentHashing          // Integração com Consistent Hashing
 	Mutex           sync.Mutex
@@ -54,15 +55,14 @@ type PageManager struct {
 
 // Função para inicializar o KeyValueStore com todos os componentes integrados
 func NewKeyValueStore(gossip *Gossip, consistentHash *ConsistentHashing, handoffInterval time.Duration, pageFileName string) (*KeyValueStore, error) {
-	pageManager, err := NewPageManager(pageFileName)
+	logFile, err := os.OpenFile(pageFileName, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
 		return nil, err
 	}
-
 	return &KeyValueStore{
 		Data:            make(map[string]*DataItem),
 		HintedData:      make(map[string]map[string]*Hint),
-		PageManager:     pageManager,
+		LogFile:         logFile,
 		Gossip:          gossip,
 		ConsistentHash:  consistentHash,
 		HandoffInterval: handoffInterval,
@@ -121,38 +121,39 @@ func (pm *PageManager) ReadPage(pageID int64) (*Page, error) {
 	offset := pageID * PageSize
 	_, err := pm.File.Seek(offset, 0)
 	if err != nil {
+		slog.Error("[PageManager] Seek failed", "pageID", pageID, "err", err)
 		return nil, err
 	}
 
 	buffer := make([]byte, PageSize)
-	_, err = pm.File.Read(buffer)
+	n, err := pm.File.Read(buffer)
 	if err != nil {
+		if err.Error() == "EOF" {
+			slog.Debug("[PageManager] Read EOF, returning empty page", "pageID", pageID)
+			return &Page{ID: pageID, Buffer: make([]byte, PageSize), Used: 0}, nil
+		}
+		slog.Error("[PageManager] Read failed", "pageID", pageID, "err", err)
 		return nil, err
 	}
-
+	slog.Debug("[PageManager] Read bytes", "n", n, "pageID", pageID)
 	return &Page{
 		ID:     pageID,
 		Buffer: buffer,
-		Used:   PageSize,
+		Used:   n,
 	}, nil
 }
 
 // Função para persistir dados em uma página no disco
 func (kv *KeyValueStore) writeDataToDisk(key, value string) {
-	page := kv.PageManager.AllocatePage()
-
-	// Escreve a chave e o valor no buffer da página
-	binaryKey := []byte(key)
-	binaryValue := []byte(value)
-
-	copy(page.Buffer, binaryKey)
-	copy(page.Buffer[len(binaryKey):], binaryValue)
-
-	err := kv.PageManager.WritePage(page)
-	if err != nil {
-		log.Printf("Error writing page for key %s: %v", key, err)
-	} else {
-		log.Printf("Wrote key %s to disk", key)
+	// Log append-only: escreve 'key:value' como nova linha
+	line := key + ":" + value + "\n"
+	if kv.LogFile != nil {
+		_, err := kv.LogFile.WriteString(line)
+		if err != nil {
+			slog.Error("[LogFile] Falha ao persistir dado", "key", key, "err", err)
+		} else {
+			slog.Debug("[LogFile] Persistido", "key", key, "value", value)
+		}
 	}
 }
 
@@ -160,25 +161,51 @@ func (kv *KeyValueStore) writeDataToDisk(key, value string) {
 // conhecidos. Caso algum nó esteja indisponível, o valor é guardado em
 // HintedData para posterior entrega.
 func (kv *KeyValueStore) Put(key, value string) {
+	slog.Info("[Put] Iniciando PUT", "key", key, "value", value)
 	vc := kv.putLocal(key, value)
-	kv.broadcastPut(key, value, vc)
-}
 
-// broadcastPut envia a operação PUT para todos os nós exceto o próprio
-// processando hinted handoff quando necessário.
-func (kv *KeyValueStore) broadcastPut(key, value string, vc *vectorclock.VectorClock) {
+	// Replicar para todos os nós (exceto ele mesmo)
+	slog.Debug("[Put] Broadcast PUT para todos os nós", "self", kv.Gossip.Self.ID, "key", key)
 	for id, node := range kv.Gossip.Nodes {
 		if id == kv.Gossip.Self.ID {
 			continue
 		}
+		if !kv.Gossip.IsNodeAlive(id) {
+			slog.Warn("[Put] Node está down. Salvando hinted handoff.", "node", id, "key", key)
+			kv.addHint(key, value, vc, id)
+			continue
+		}
+		slog.Info("[Put] Enviando PUT para nó", "node", id, "key", key)
+		err := kv.Gossip.sendPutToNode(node, key, value, vc)
+		if err != nil {
+			slog.Error("[Put] Falha ao enviar PUT", "node", id, "key", key, "err", err)
+		} else {
+			slog.Info("[Put] PUT enviado com sucesso", "node", id, "key", key)
+		}
+	}
+}
+
+// broadcastPut envia a operação PUT para todos os nós exceto o próprio
+// processando hinted handoff quando necessário.
+func (kv *KeyValueStore) broadcastPut(key, value string, vc *vectorclock.VectorClock, excludeID string) {
+	for id, node := range kv.Gossip.Nodes {
+		if id == kv.Gossip.Self.ID || id == excludeID {
+			continue
+		}
 
 		if !kv.Gossip.IsNodeAlive(id) {
-			log.Printf("Node %s is down. Storing hinted handoff for key %s", id, key)
+			slog.Warn("[broadcastPut] Node está down. Salvando hinted handoff", "node", id, "key", key)
 			kv.addHint(key, value, vc, id)
 			continue
 		}
 
-		kv.Gossip.sendPutToNode(node, key, value, vc)
+		slog.Info("[broadcastPut] Enviando PUT", "node", id, "key", key)
+		err := kv.Gossip.sendPutToNode(node, key, value, vc)
+		if err != nil {
+			slog.Error("[broadcastPut] Falha ao enviar PUT", "node", id, "key", key, "err", err)
+		} else {
+			slog.Info("[broadcastPut] PUT enviado com sucesso", "node", id, "key", key)
+		}
 	}
 }
 
@@ -210,7 +237,7 @@ func (kv *KeyValueStore) Get(key string) (string, *vectorclock.VectorClock, bool
 
 	if vnode.ID != kv.Gossip.Self.ID {
 		if !kv.Gossip.IsNodeAlive(vnode.ID) {
-			log.Printf("Node %s is down. Key %s might be in hinted handoff.", vnode.ID, key)
+			slog.Warn("Node is down, key might be in hinted handoff", "node", vnode.ID, "key", key)
 			return "", nil, false
 		}
 		return kv.Gossip.sendGetToNode(vnode, key)
@@ -227,7 +254,7 @@ func (kv *KeyValueStore) putLocal(key, value string) *vectorclock.VectorClock {
 	var vc *vectorclock.VectorClock
 	if item, exists := kv.Data[key]; exists {
 		item.VectorClock.Increment(kv.Gossip.Self.ID)
-		log.Printf("Updated key %s with new value. VectorClock: %s", key, item.VectorClock.String())
+		slog.Debug("Updated key with new value", "key", key, "vectorclock", item.VectorClock.String())
 		item.Value = value
 		vc = item.VectorClock
 	} else {
@@ -235,9 +262,10 @@ func (kv *KeyValueStore) putLocal(key, value string) *vectorclock.VectorClock {
 
 		vc.Increment(kv.Gossip.Self.ID)
 		kv.Data[key] = &DataItem{Value: value, VectorClock: vc}
-		log.Printf("Stored key %s with initial VectorClock: %s", key, vc.String())
+		slog.Debug("Stored key with initial VectorClock", "key", key, "vectorclock", vc.String())
 	}
 
+	slog.Debug("[putLocal] Persistindo chave no disco", "key", key)
 	kv.writeDataToDisk(key, value)
 	return vc
 }
@@ -248,35 +276,56 @@ func (kv *KeyValueStore) getLocal(key string) (string, *vectorclock.VectorClock,
 	defer kv.Mutex.Unlock()
 
 	if item, exists := kv.Data[key]; exists {
+		slog.Debug("[getLocal] Chave encontrada na memória", "key", key)
 		return item.Value, item.VectorClock, true
 	}
 
 	value, found := kv.readDataFromDisk(key)
 	if found {
+		slog.Debug("[getLocal] Chave encontrada no disco", "key", key)
 		return value, nil, true
 	}
 
+	slog.Debug("[getLocal] Chave não encontrada", "key", key)
 	return "", nil, false
 }
 
 // Função para ler dados de uma página do disco
 func (kv *KeyValueStore) readDataFromDisk(key string) (string, bool) {
-	pageID := kv.getPageIDForKey(key)
-
-	page, err := kv.PageManager.ReadPage(pageID)
-	if err != nil {
-		log.Printf("Error reading page for key %s: %v", key, err)
+	// Busca a última ocorrência da chave no arquivo de log
+	if kv.LogFile == nil {
 		return "", false
 	}
-
-	value := string(page.Buffer)
-	log.Printf("Read key %s from disk", key)
-	return value, true
+	stat, err := kv.LogFile.Stat()
+	if err != nil {
+		slog.Error("[LogFile] Falha ao obter stat", "err", err)
+		return "", false
+	}
+	size := stat.Size()
+	buf := make([]byte, size)
+	_, err = kv.LogFile.ReadAt(buf, 0)
+	if err != nil {
+		slog.Error("[LogFile] Falha ao ler arquivo", "err", err)
+		return "", false
+	}
+	lines := string(buf)
+	var found string
+	for _, line := range strings.Split(lines, "\n") {
+		if strings.HasPrefix(line, key+":") {
+			found = strings.TrimPrefix(line, key+":")
+		}
+	}
+	if found != "" {
+		slog.Debug("[LogFile] Valor encontrado no disco", "key", key, "value", found)
+		return found, true
+	}
+	slog.Debug("[LogFile] Valor não encontrado no disco", "key", key)
+	return "", false
 }
 
 // Função que mapeia uma chave para um ID de página
 func (kv *KeyValueStore) getPageIDForKey(key string) int64 {
-	return int64(len(key)) // Exemplo simples de mapeamento de chave para página
+	return 0 // Não usado com log append-only
 }
 
 // Função para processar hinted handoff e reenviar dados para o nó de destino quando ele voltar
@@ -295,13 +344,13 @@ func (kv *KeyValueStore) processHintedHandoff() {
 	for key, hints := range kv.HintedData {
 		for targetID, hint := range hints {
 			if kv.Gossip.IsNodeAlive(targetID) {
-				log.Printf("Reapplying hinted handoff for key %s to node %s", key, targetID)
+				slog.Info("[HintedHandoff] Reaplicando hinted handoff", "key", key, "node", targetID)
 				if node, ok := kv.Gossip.Nodes[targetID]; ok {
 					kv.Gossip.sendPutToNode(node, hint.Key, hint.Value, hint.VectorClock)
 				}
 				delete(hints, targetID)
 			} else {
-				log.Printf("Node %s still down, keeping hinted handoff for key %s", targetID, key)
+				slog.Debug("[HintedHandoff] Node ainda down, mantendo hinted handoff", "node", targetID, "key", key)
 			}
 		}
 		if len(hints) == 0 {
@@ -319,19 +368,24 @@ func (kv *KeyValueStore) ResolveConflicts(key string, newValue string, newVector
 		comparison := item.VectorClock.Compare(newVectorClock)
 		switch comparison {
 		case -1: // Novo dado é mais recente
-			log.Printf("Key %s updated with more recent value. New VectorClock: %s", key, newVectorClock.String())
+			slog.Info("[ResolveConflicts] Valor mais recente recebido", "key", key, "vectorclock", newVectorClock.String())
 			item.Value = newValue
 			item.VectorClock.Merge(newVectorClock)
 		case 0: // Conflito detectado
-			log.Printf("Conflict detected for key %s. Keeping both versions.", key)
+			slog.Warn("[ResolveConflicts] Conflito detectado, realizando merge", "key", key)
+			// Estratégia: merge do VectorClock e atualização do valor (pode ser customizada)
+			item.VectorClock.Merge(newVectorClock)
+			item.Value = newValue // ou manter ambos, se for necessário
 		case 1: // Dado existente é mais recente, nenhuma atualização aplicada
-			log.Printf("Existing value for key %s is more recent. No update applied.", key)
+			slog.Debug("[ResolveConflicts] Valor local mais recente, ignorando update", "key", key)
 		}
+		kv.writeDataToDisk(key, item.Value)
 	} else {
 		kv.Data[key] = &DataItem{
 			Value:       newValue,
 			VectorClock: newVectorClock,
 		}
-		log.Printf("Stored new key %s with VectorClock: %s", key, newVectorClock.String())
+		slog.Info("[ResolveConflicts] Nova chave armazenada", "key", key, "vectorclock", newVectorClock.String())
+		kv.writeDataToDisk(key, newValue)
 	}
 }
