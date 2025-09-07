@@ -5,7 +5,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/bquerino/kv-g/internal/store"
+	"github.com/bquerino/kv-golang/internal/store"
 )
 
 func main() {

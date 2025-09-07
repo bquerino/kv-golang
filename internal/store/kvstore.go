@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bquerino/kv-g/internal/vectorclock"
+	"github.com/bquerino/kv-golang/internal/vectorclock"
 )
 
 const PageSize = 4096 // Tamanho fixo da página (4KB)
