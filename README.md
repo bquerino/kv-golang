@@ -1,6 +1,276 @@
-# KV-Store Distribuído com Dual-Mode Architecture
+# 🚀 KV-Store Distribuído com Observabilidade Completa
 
-Este projeto implementa um **KV-Store (Key-Value Store) distribuído** usando Go, com suporte para **dois modos de operação distintos**: **Leaderless (Gossip)** e **Leader-Follower**. O sistema foi projetado para funcionar em um ambiente distribuído com múltiplos nós que se comunicam entre si, oferecendo flexibilidade entre alta disponibilidade e consistência forte.
+Sistema de Key-Value Store distribuído implementado em Go com suporte a dois modos de operação e observabilidade completa integrada.
+
+## 🎯 Features
+
+### **Modos de Operação**
+- 🔄 **LEADERLESS**: Replicação eventual com gossip protocol
+- 👑 **LEADER-FOLLOWER**: Consenso com eleição de líder e heartbeats
+
+### **Observabilidade Integrada**
+- 📊 **Prometheus**: 15+ métricas customizadas (P50/P95/P99, throughput, replication lag)
+- 📈 **Grafana**: Dashboards específicos para performance e consistência
+- 🚨 **AlertManager**: Alertas automáticos para degradação do sistema
+- 🧪 **K6 Testing**: Testes de carga e failover automatizados
+
+### **Testes de Consistência**
+- ✅ Read-your-writes consistency
+- ✅ Monotonic reads
+- ✅ Eventual consistency
+- ✅ Staleness measurement
+- ✅ Conflict detection & resolution
+
+## 🚀 Início Rápido
+
+### **Opção 1: Script Interativo (Recomendado)**
+```bash
+./scripts/run-complete-stack.sh
+```
+
+### **Opção 2: Docker Compose Direto**
+
+#### **Modo LEADERLESS (padrão) com Observabilidade**
+```bash
+docker-compose up --build -d
+```
+
+#### **Modo LEADERLESS (explícito) com Observabilidade**
+```bash
+docker-compose -f docker-compose-leaderless.yml up --build -d
+```
+
+#### **Modo LEADER-FOLLOWER com Observabilidade**
+```bash
+docker-compose -f docker-compose-leader-follower.yml up --build -d
+```
+
+#### **Desenvolvimento (Observability Only)**
+```bash
+docker-compose -f docker-compose-observability.yml up --build -d
+```
+
+## 📊 Acessar Dashboards
+
+| Serviço | URL | Credenciais |
+|---------|-----|-------------|
+| KV-Store | http://localhost:8080 | - |
+| Grafana | http://localhost:3000 | admin/admin |
+| Prometheus | http://localhost:9090 | - |
+| AlertManager | http://localhost:9093 | - |
+
+## 🧪 Executar Testes
+
+### **Teste de Carga com K6**
+```bash
+docker-compose --profile testing run --rm k6 run /scripts/load-test.js
+```
+
+### **Teste de Failover**
+```bash
+docker-compose --profile testing run --rm k6 run /scripts/failover-test.js
+```
+
+### **Teste Manual de Consistência**
+```bash
+./scripts/test-consistency-checks.sh
+```
+
+### **Relatório Completo**
+```bash
+./scripts/generate-test-report.sh
+```
+
+## 🔧 API Endpoints
+
+### **PUT - Armazenar Chave**
+```bash
+curl -X POST http://localhost:8080/store \
+  -H "Content-Type: application/json" \
+  -d '{"key":"test","value":"hello"}'
+```
+
+### **GET - Buscar Chave**
+```bash
+curl http://localhost:8080/store/test
+```
+
+### **Health Check**
+```bash
+curl http://localhost:8080/health
+```
+
+### **Métricas Prometheus**
+```bash
+curl http://localhost:9091/metrics  # Node 1
+curl http://localhost:9092/metrics  # Node 2  
+curl http://localhost:9093/metrics  # Node 3
+```
+
+## 📈 Métricas Principais
+
+### **Performance**
+- `kvstore_request_duration_seconds` - Latência de requests (P50/P95/P99)
+- `kvstore_requests_total` - Total de requests (throughput)
+- `kvstore_replication_latency_seconds` - Latência de replicação
+
+### **Consistência**
+- `kvstore_conflicts_total` - Conflitos detectados
+- `kvstore_consistency_violations_total` - Violações de consistência
+- `kvstore_conflict_resolution_duration_seconds` - Tempo de resolução
+
+### **Cluster Health**
+- `kvstore_node_status` - Status dos nós (0=down, 1=up)
+- `kvstore_is_leader` - Líder atual (modo leader-follower)
+- `kvstore_elections_total` - Total de eleições
+
+## 🚨 Alertas Configurados
+
+- **HighRequestLatency**: P95 > 1.0s
+- **HighReplicationLatency**: P95 replication > 2.0s  
+- **ReplicationFailures**: >10 falhas em 5min
+- **ConsistencyViolations**: >5 violações em 5min
+- **NodeDown**: Nó indisponível por 30s
+- **NoLeader**: Sem líder por 30s
+- **MultipleLeaders**: Split-brain detectado
+
+## 📁 Estrutura do Projeto
+
+```
+📁 kv-golang/
+├── 📄 docker-compose.yml                    # LEADERLESS (padrão) + observability
+├── 📄 docker-compose-leaderless.yml         # LEADERLESS (explícito) + observability  
+├── 📄 docker-compose-leader-follower.yml    # LEADER-FOLLOWER + observability
+├── 📄 docker-compose-observability.yml      # Desenvolvimento completo
+│
+├── 📁 cmd/
+│   ├── 📁 server/                           # Servidor KV-Store
+│   └── 📁 client/                           # Cliente de exemplo
+│
+├── 📁 internal/
+│   ├── 📁 store/                            # Core do KV-Store
+│   ├── 📁 metrics/                          # Métricas Prometheus
+│   ├── 📁 config/                           # Configurações
+│   └── 📁 vectorclock/                      # Vector clocks
+│
+├── 📁 grafana/
+│   ├── 📁 dashboards/                       # Dashboards customizados
+│   └── 📁 datasources/                      # Configuração data sources
+│
+├── 📁 k6/
+│   ├── 📄 load-test.js                      # Teste de carga + consistência
+│   └── 📄 failover-test.js                  # Teste de failover
+│
+├── 📁 scripts/
+│   ├── 📄 run-complete-stack.sh             # Script principal interativo
+│   ├── 📄 test-consistency-checks.sh        # Testes manuais
+│   └── 📄 generate-test-report.sh           # Relatórios automáticos
+│
+└── 📁 docs/
+    ├── 📄 observability-guide.md            # Guia completo de observabilidade
+    ├── 📄 testing-guide.md                  # Guia de testes
+    └── 📄 usage-guide.md                    # Guia de uso
+```
+
+## 🔍 Troubleshooting
+
+### **Problema**: Serviços não iniciam
+```bash
+# Verificar logs
+docker-compose logs
+
+# Limpar ambiente
+docker-compose down -v
+docker system prune -f
+```
+
+### **Problema**: Métricas não aparecem
+```bash
+# Verificar endpoints
+curl http://localhost:9091/metrics
+
+# Verificar targets no Prometheus
+curl http://localhost:9090/api/v1/targets
+```
+
+### **Problema**: Tests K6 falham
+```bash
+# Verificar saúde dos nós
+curl http://localhost:8081/health
+curl http://localhost:8082/health  
+curl http://localhost:8083/health
+```
+
+## 🌟 Casos de Uso
+
+### **1. Desenvolvimento Local**
+```bash
+# Iniciar modo mínimo
+docker-compose up -d
+
+# Testes rápidos
+./scripts/test-consistency-checks.sh
+```
+
+### **2. Performance Testing**
+```bash
+# Iniciar com observabilidade
+./scripts/run-complete-stack.sh
+
+# Executar testes K6
+# (via menu interativo)
+```
+
+### **3. Teste de Resiliência**
+```bash
+# Simular falhas de nó
+docker-compose stop node2
+
+# Executar testes de failover
+docker-compose --profile testing run --rm k6 run /scripts/failover-test.js
+```
+
+### **4. Análise de Produção**
+```bash
+# Gerar relatórios completos
+./scripts/generate-test-report.sh
+
+# Analisar no Grafana
+# http://localhost:3000
+```
+
+## 📚 Documentação Completa
+
+- 📖 [Guia de Observabilidade](docs/observability-guide.md)
+- 🧪 [Guia de Testes](docs/testing-guide.md)  
+- 📋 [Guia de Uso](docs/usage-guide.md)
+- 🏗️ [Arquitetura](docs/arquitetura.md)
+
+## 🎯 Próximos Passos
+
+1. **Scaling**: Adicionar mais nós modificando docker-compose
+2. **CI/CD**: Integrar testes automatizados no pipeline
+3. **Production**: Deploy em Kubernetes com Helm charts
+4. **Monitoring**: Integrar alertas com Slack/PagerDuty
+
+---
+
+## 🚀 Para Começar
+
+```bash
+# Clonar repositório
+git clone https://github.com/bquerino/kv-golang.git
+cd kv-golang
+
+# Executar stack completa
+./scripts/run-complete-stack.sh
+
+# Acessar dashboards
+# Grafana: http://localhost:3000 (admin/admin)
+# Prometheus: http://localhost:9090
+```
+
+**🎉 Stack completa de observabilidade implementada para todos os modos!**
 
 ## 🎯 Modos de Operação
 

@@ -1,0 +1,246 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "KV-Store Distributed System Metrics",
+    "tags": ["kvstore", "distributed", "performance"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Request Latency Percentiles",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.50, rate(kvstore_request_duration_seconds_bucket[5m]))",
+            "legendFormat": "P50",
+            "refId": "A"
+          },
+          {
+            "expr": "histogram_quantile(0.95, rate(kvstore_request_duration_seconds_bucket[5m]))",
+            "legendFormat": "P95",
+            "refId": "B"
+          },
+          {
+            "expr": "histogram_quantile(0.99, rate(kvstore_request_duration_seconds_bucket[5m]))",
+            "legendFormat": "P99",
+            "refId": "C"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "custom": {
+              "displayMode": "list",
+              "orientation": "horizontal"
+            },
+            "mappings": [],
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 0.1},
+                {"color": "red", "value": 0.5}
+              ]
+            },
+            "unit": "s"
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Throughput (Requests/sec)",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(rate(kvstore_requests_total[5m]))",
+            "legendFormat": "Total RPS",
+            "refId": "A"
+          },
+          {
+            "expr": "sum(rate(kvstore_requests_total{operation=\"put\"}[5m]))",
+            "legendFormat": "PUT RPS",
+            "refId": "B"
+          },
+          {
+            "expr": "sum(rate(kvstore_requests_total{operation=\"get\"}[5m]))",
+            "legendFormat": "GET RPS",
+            "refId": "C"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "unit": "reqps"
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "Replication Lag",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(kvstore_replication_latency_seconds_bucket[5m]))",
+            "legendFormat": "P95 Replication Lag",
+            "refId": "A"
+          },
+          {
+            "expr": "rate(kvstore_replication_errors_total[5m])",
+            "legendFormat": "Replication Errors/sec",
+            "refId": "B"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "unit": "s"
+          }
+        },
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 8}
+      },
+      {
+        "id": 4,
+        "title": "Conflict Rate",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "rate(kvstore_conflicts_total[5m])",
+            "legendFormat": "Conflicts/sec by {{resolution_type}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "unit": "cps"
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16}
+      },
+      {
+        "id": 5,
+        "title": "Convergence Time",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(kvstore_convergence_time_seconds_bucket[5m]))",
+            "legendFormat": "P95 Convergence Time",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "unit": "s"
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16}
+      },
+      {
+        "id": 6,
+        "title": "Leader Elections",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "rate(kvstore_elections_total[5m])",
+            "legendFormat": "Elections/min",
+            "refId": "A"
+          },
+          {
+            "expr": "histogram_quantile(0.95, rate(kvstore_election_duration_seconds_bucket[5m]))",
+            "legendFormat": "P95 Election Duration",
+            "refId": "B"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"}
+          }
+        },
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 24}
+      },
+      {
+        "id": 7,
+        "title": "Node Health",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "kvstore_node_status",
+            "legendFormat": "{{node_id}} Status",
+            "refId": "A"
+          },
+          {
+            "expr": "kvstore_is_leader",
+            "legendFormat": "{{node_id}} Is Leader",
+            "refId": "B"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "min": 0,
+            "max": 1
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32}
+      },
+      {
+        "id": 8,
+        "title": "Consistency Violations",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "rate(kvstore_read_your_writes_violations_total[5m])",
+            "legendFormat": "Read-Your-Writes Violations/sec",
+            "refId": "A"
+          },
+          {
+            "expr": "rate(kvstore_monotonic_read_violations_total[5m])",
+            "legendFormat": "Monotonic Read Violations/sec",
+            "refId": "B"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "unit": "cps"
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32}
+      },
+      {
+        "id": 9,
+        "title": "Resource Usage",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "kvstore_keys_stored",
+            "legendFormat": "{{node_id}} Keys Stored",
+            "refId": "A"
+          },
+          {
+            "expr": "sum(kvstore_hinted_handoff_queue_size) by (node_id)",
+            "legendFormat": "{{node_id}} Hinted Handoff Queue",
+            "refId": "B"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"}
+          }
+        },
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 40}
+      }
+    ],
+    "time": {
+      "from": "now-30m",
+      "to": "now"
+    },
+    "timepicker": {},
+    "uid": "kvstore-dashboard",
+    "version": 1
+  }
+}

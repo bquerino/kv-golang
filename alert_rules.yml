@@ -1,0 +1,74 @@
+groups:
+  - name: kvstore_alerts
+    rules:
+      - alert: HighRequestLatency
+        expr: kvstore_request_duration_seconds{quantile="0.95"} > 1.0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High request latency detected"
+          description: "P95 latency is {{ $value }}s for operation {{ $labels.operation }}"
+
+      - alert: HighReplicationLatency
+        expr: kvstore_replication_latency_seconds{quantile="0.95"} > 2.0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High replication latency detected"
+          description: "P95 replication latency is {{ $value }}s to node {{ $labels.target_node }}"
+
+      - alert: ReplicationFailures
+        expr: increase(kvstore_replication_failures_total[5m]) > 10
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "High replication failure rate"
+          description: "{{ $value }} replication failures in the last 5 minutes"
+
+      - alert: ConsistencyViolations
+        expr: increase(kvstore_consistency_violations_total[5m]) > 5
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Consistency violations detected"
+          description: "{{ $value }} consistency violations in the last 5 minutes"
+
+      - alert: NodeDown
+        expr: kvstore_node_status == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node is down"
+          description: "Node {{ $labels.node_id }} is down"
+
+      - alert: NoLeader
+        expr: sum(kvstore_is_leader) == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "No leader elected"
+          description: "No leader is currently elected in the cluster"
+
+      - alert: MultipleLeaders
+        expr: sum(kvstore_is_leader) > 1
+        for: 10s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Multiple leaders detected"
+          description: "{{ $value }} leaders detected - split brain scenario"
+
+      - alert: HighConflictRate
+        expr: rate(kvstore_conflicts_total[5m]) > 0.1
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High conflict rate"
+          description: "Conflict rate is {{ $value }} conflicts/second"

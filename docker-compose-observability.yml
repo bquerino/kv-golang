@@ -1,54 +1,56 @@
-# Docker Compose para modo LEADERLESS (explícito) com Observabilidade
-# Para usar: docker-compose -f docker-compose-leaderless.yml up --build -d
-
 services:
+  # KV Store nodes
   node1:
     build: .
-    command: ["node1", "8081", "--mode", "leaderless"]
+    command: ["./server", "node1", "8081", "--mode=leader-follower"]
     ports:
       - "8081:8081"
-      - "9091:9091"  # Metrics
-    networks:
-      - kvnet
     environment:
-      - MODE=leaderless
-    
+      - METRICS_ENABLED=true
+    networks:
+      - kv-network
+    depends_on:
+      - prometheus
+
   node2:
     build: .
-    command: ["node2", "8082", "--mode", "leaderless"]
+    command: ["./server", "node2", "8082", "--mode=leader-follower"]
     ports:
       - "8082:8082"
-      - "9092:9092"  # Metrics
-    networks:
-      - kvnet
     environment:
-      - MODE=leaderless
-      
+      - METRICS_ENABLED=true
+    networks:
+      - kv-network
+    depends_on:
+      - prometheus
+
   node3:
     build: .
-    command: ["node3", "8083", "--mode", "leaderless"]
+    command: ["./server", "node3", "8083", "--mode=leader-follower"]
     ports:
       - "8083:8083"
-      - "9093:9093"  # Metrics
-    networks:
-      - kvnet
     environment:
-      - MODE=leaderless
-      
+      - METRICS_ENABLED=true
+    networks:
+      - kv-network
+    depends_on:
+      - prometheus
+
+  # Load balancer
   nginx:
     image: nginx:alpine
     ports:
       - "8080:8080"
     volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx.conf:/etc/nginx/nginx.conf
     depends_on:
       - node1
       - node2
       - node3
     networks:
-      - kvnet
+      - kv-network
 
-  # Observability Stack
+  # Observability stack
   prometheus:
     image: prom/prometheus:latest
     ports:
@@ -56,6 +58,7 @@ services:
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
       - ./alert_rules.yml:/etc/prometheus/alert_rules.yml
+      - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
@@ -65,11 +68,7 @@ services:
       - '--web.enable-lifecycle'
       - '--web.enable-admin-api'
     networks:
-      - kvnet
-    depends_on:
-      - node1
-      - node2
-      - node3
+      - kv-network
 
   grafana:
     image: grafana/grafana:latest
@@ -79,43 +78,40 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=admin
       - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
-      - grafana-storage:/var/lib/grafana
-      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards
-      - ./grafana/datasources:/etc/grafana/provisioning/datasources
-    networks:
-      - kvnet
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+      - grafana_data:/var/lib/grafana
     depends_on:
       - prometheus
+    networks:
+      - kv-network
 
+  # Alert manager
   alertmanager:
     image: prom/alertmanager:latest
     ports:
       - "9094:9093"
     volumes:
       - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml
-    command:
-      - '--config.file=/etc/alertmanager/alertmanager.yml'
-      - '--storage.path=/alertmanager'
     networks:
-      - kvnet
+      - kv-network
 
-  # K6 para testes de carga
+  # K6 for load testing
   k6:
     image: grafana/k6:latest
     volumes:
       - ./k6:/scripts
+    environment:
+      - K6_PROMETHEUS_RW_TREND_AS_NATIVE_HISTOGRAM=true
     networks:
-      - kvnet
-    depends_on:
-      - node1
-      - node2
-      - node3
+      - kv-network
     profiles:
       - testing
 
-networks:
-  kvnet:
-    driver: bridge
-
 volumes:
-  grafana-storage:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  kv-network:
+    driver: bridge

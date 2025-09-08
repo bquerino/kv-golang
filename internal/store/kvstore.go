@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bquerino/kv-golang/internal/metrics"
 	"github.com/bquerino/kv-golang/internal/vectorclock"
 )
 
@@ -161,11 +162,20 @@ func (kv *KeyValueStore) writeDataToDisk(key, value string) {
 // conhecidos. Caso algum nó esteja indisponível, o valor é guardado em
 // HintedData para posterior entrega.
 func (kv *KeyValueStore) Put(key, value string) {
+	start := time.Now()
+	defer func() {
+		metrics.RequestDuration.WithLabelValues("PUT").Observe(time.Since(start).Seconds())
+		metrics.RequestsTotal.WithLabelValues("PUT").Inc()
+	}()
+
 	slog.Info("[Put] Iniciando PUT", "key", key, "value", value)
 	vc := kv.putLocal(key, value)
 
 	// Replicar para todos os nós (exceto ele mesmo)
 	slog.Debug("[Put] Broadcast PUT para todos os nós", "self", kv.Gossip.Self.ID, "key", key)
+	replicas := 0
+	failures := 0
+
 	for id, node := range kv.Gossip.Nodes {
 		if id == kv.Gossip.Self.ID {
 			continue
@@ -175,13 +185,25 @@ func (kv *KeyValueStore) Put(key, value string) {
 			kv.addHint(key, value, vc, id)
 			continue
 		}
+
+		replicationStart := time.Now()
 		slog.Info("[Put] Enviando PUT para nó", "node", id, "key", key)
 		err := kv.Gossip.sendPutToNode(node, key, value, vc)
+
 		if err != nil {
 			slog.Error("[Put] Falha ao enviar PUT", "node", id, "key", key, "err", err)
+			metrics.ReplicationFailuresTotal.WithLabelValues(id).Inc()
+			failures++
 		} else {
 			slog.Info("[Put] PUT enviado com sucesso", "node", id, "key", key)
+			metrics.ReplicationLatency.WithLabelValues(id).Observe(time.Since(replicationStart).Seconds())
+			replicas++
 		}
+	}
+
+	metrics.ReplicationSuccessTotal.WithLabelValues().Add(float64(replicas))
+	if failures > 0 {
+		metrics.ReplicationFailuresTotal.WithLabelValues("").Add(float64(failures))
 	}
 }
 
@@ -229,6 +251,12 @@ func (kv *KeyValueStore) addHint(key, value string, vc *vectorclock.VectorClock,
 // todos os nós possam responder leituras mesmo que o responsável esteja
 // indisponível.
 func (kv *KeyValueStore) Get(key string) (string, *vectorclock.VectorClock, bool) {
+	start := time.Now()
+	defer func() {
+		metrics.RequestDuration.WithLabelValues("GET").Observe(time.Since(start).Seconds())
+		metrics.RequestsTotal.WithLabelValues("GET").Inc()
+	}()
+
 	if value, vc, found := kv.getLocal(key); found {
 		return value, vc, true
 	}

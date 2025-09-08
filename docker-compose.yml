@@ -1,4 +1,4 @@
-# Docker Compose para modo LEADERLESS (padrão)
+# Docker Compose para modo LEADERLESS (padrão) com Observabilidade
 # Para usar: docker-compose up --build -d
 
 services:
@@ -7,6 +7,7 @@ services:
     command: ["node1", "8081"]
     ports:
       - "8081:8081"
+      - "9091:9091"  # Metrics
     networks:
       - kvnet
     environment:
@@ -17,6 +18,7 @@ services:
     command: ["node2", "8082"]
     ports:
       - "8082:8082"
+      - "9092:9092"  # Metrics
     networks:
       - kvnet
     environment:
@@ -27,6 +29,7 @@ services:
     command: ["node3", "8083"]
     ports:
       - "8083:8083"
+      - "9093:9093"  # Metrics
     networks:
       - kvnet
     environment:
@@ -45,6 +48,74 @@ services:
     networks:
       - kvnet
 
+  # Observability Stack
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./alert_rules.yml:/etc/prometheus/alert_rules.yml
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+    networks:
+      - kvnet
+    depends_on:
+      - node1
+      - node2
+      - node3
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-storage:/var/lib/grafana
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources
+    networks:
+      - kvnet
+    depends_on:
+      - prometheus
+
+  alertmanager:
+    image: prom/alertmanager:latest
+    ports:
+      - "9094:9093"
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    networks:
+      - kvnet
+
+  # K6 para testes de carga
+  k6:
+    image: grafana/k6:latest
+    volumes:
+      - ./k6:/scripts
+    networks:
+      - kvnet
+    depends_on:
+      - node1
+      - node2
+      - node3
+    profiles:
+      - testing
+
 networks:
   kvnet:
     driver: bridge
+
+volumes:
+  grafana-storage:

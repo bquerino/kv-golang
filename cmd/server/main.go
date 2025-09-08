@@ -3,12 +3,15 @@ package main
 import (
 	"log"
 	"log/slog"
+	"net/http"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/bquerino/kv-golang/internal/config"
+	"github.com/bquerino/kv-golang/internal/metrics"
 	"github.com/bquerino/kv-golang/internal/store"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
@@ -98,6 +101,9 @@ func parseArgs() *config.Config {
 func runServer(cfg *config.Config) {
 	address := cfg.NodeID + ":" + cfg.Port
 
+	// Inicializar métricas
+	metrics.Init()
+
 	// Usa o construtor com configuração
 	gossip := store.NewGossipWithConfig(cfg.NodeID, address, 3*time.Second, 3, cfg)
 
@@ -124,6 +130,16 @@ func runServer(cfg *config.Config) {
 	} else {
 		log.Printf("Node %s started in LEADERLESS mode on %s", cfg.NodeID, address)
 	}
+
+	// Expor métricas Prometheus
+	http.Handle("/metrics", promhttp.Handler())
+	metricsPort := "909" + string(cfg.Port[len(cfg.Port)-1]) // 9091, 9092, 9093
+	go func() {
+		log.Printf("Starting metrics server on port %s", metricsPort)
+		if err := http.ListenAndServe(":"+metricsPort, nil); err != nil {
+			log.Printf("Failed to start metrics server: %v", err)
+		}
+	}()
 
 	select {} // keep running
 }
