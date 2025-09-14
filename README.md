@@ -23,9 +23,20 @@ Sistema de Key-Value Store distribuído implementado em Go com suporte a dois mo
 
 ## 🚀 Início Rápido
 
-### **Opção 1: Script Interativo (Recomendado)**
+### **Opção 1: Scripts Simplificados (Recomendado)**
+
 ```bash
-./scripts/run-complete-stack.sh
+# Leader-Follower com observabilidade completa
+./scripts/run-leader-follower.sh
+
+# Leaderless com observabilidade completa  
+./scripts/run-leaderless.sh
+
+# Leaderless com testes de consistência
+./scripts/run-leaderless.sh consistency
+
+# Comparar ambos os modos
+./scripts/compare-modes.sh
 ```
 
 ### **Opção 2: Docker Compose Direto**
@@ -45,31 +56,180 @@ docker-compose -f docker-compose-leaderless.yml up --build -d
 docker-compose -f docker-compose-leader-follower.yml up --build -d
 ```
 
-#### **Desenvolvimento (Observability Only)**
+#### **Desenvolvimento (Observability Only com Testes Automáticos)**
+
+**Leader-Follower com Testes Automáticos:**
 ```bash
-docker-compose -f docker-compose-observability.yml up --build -d
+docker-compose -f docker-compose-observability.yml up --build
 ```
 
-## 📊 Acessar Dashboards
+**Leaderless com Testes Automáticos:**
+```bash
+docker-compose -f docker-compose-observability-leaderless.yml up --build
+```
 
-| Serviço | URL | Credenciais |
-|---------|-----|-------------|
-| KV-Store | http://localhost:8080 | - |
-| Grafana | http://localhost:3000 | admin/admin |
-| Prometheus | http://localhost:9090 | - |
-| AlertManager | http://localhost:9093 | - |
+**⚡ Novidades**: Ambos arquivos executam **automaticamente** os testes K6 quando o stack sobe:
+- 🧪 **Testes de Carga**: Executam automaticamente ao iniciar
+- 📊 **Métricas em Tempo Real**: Coletadas durante os testes  
+- 🎯 **Failover Testing**: Disponível com `--profile extended-testing`
+- 🔄 **Consistency Testing**: Para modo leaderless com `--profile consistency-testing`
+
+```bash
+# Leader-Follower: Stack com testes básicos (automático)
+docker-compose -f docker-compose-observability.yml up --build
+
+# Leader-Follower: Stack com testes estendidos (carga + failover)
+docker-compose -f docker-compose-observability.yml --profile extended-testing up --build
+
+# Leaderless: Stack com testes básicos (automático)
+docker-compose -f docker-compose-observability-leaderless.yml up --build
+
+# Leaderless: Stack com testes estendidos (carga + failover + consistência)
+docker-compose -f docker-compose-observability-leaderless.yml --profile consistency-testing up --build
+```
+
+## 📊 Acessar Dashboards e Testes
+
+| Serviço | URL | Credenciais | Observações |
+|---------|-----|-------------|-------------|
+| KV-Store | http://localhost:8080 | - | Load balancer nginx |
+| Grafana | http://localhost:3000 | admin/admin | Dashboards em tempo real |
+| Prometheus | http://localhost:9090 | - | Métricas e targets |
+| AlertManager | http://localhost:9094 | - | Sistema de alertas |
+
+### **🧪 Testes Automáticos**
+
+| Arquivo | Modo | Testes Disponíveis | Execução |
+|---------|------|-------------------|----------|
+| `docker-compose-observability.yml` | Leader-Follower | Load Test + Failover | Automática |
+| `docker-compose-observability-leaderless.yml` | Leaderless | Load Test + Failover + Consistency | Automática |
+
+| Teste | Execução | Duração | Observação |
+|-------|----------|---------|-------------|
+| **K6 Load Test** | Automática ao subir stack | ~16min | Testes de carga + performance |
+| **K6 Failover** | Com `--profile extended-testing` | ~10min | Testes de falha de nó |
+| **K6 Consistency** | Com `--profile consistency-testing` | ~7min | **Apenas leaderless** - eventual, causal, read-your-writes |
+
+**Acompanhar testes:**
+```bash
+# Ver logs do K6 Leader-Follower em tempo real
+docker-compose -f docker-compose-observability.yml logs -f k6-load-test
+
+# Ver logs do K6 Leaderless em tempo real  
+docker-compose -f docker-compose-observability-leaderless.yml logs -f k6-load-test
+
+# Ver métricas no Grafana durante os testes
+# http://localhost:3000
+
+# Verificar resultados salvos
+ls -la ./test-results/
+```
 
 ## 🧪 Executar Testes
 
-### **Teste de Carga com K6**
+## 🔄 Comparação de Modos
+
+| Aspecto | Leader-Follower | Leaderless |
+|---------|----------------|------------|
+| **Consistência** | Strong Consistency | Eventual Consistency |
+| **Disponibilidade** | Single Point of Failure (leader) | High Availability |
+| **Complexidade** | Simples (decisões centralizadas) | Complexa (consensus distribuído) |
+| **Latência Escrita** | Baixa (1 round-trip) | Variável (quorum) |
+| **Latência Leitura** | Baixa (direto do leader) | Baixa (qualquer nó) |
+| **Testes Específicos** | Failover, Performance | Consistency, Convergência, CAP |
+| **Comando Básico** | `docker-compose -f docker-compose-leader-follower.yml up --build` | `docker-compose -f docker-compose-leaderless.yml up --build` |
+| **Com Testes Automáticos** | `docker-compose -f docker-compose-observability.yml up --build` | `docker-compose -f docker-compose-observability-leaderless.yml up --build` |
+
+| Arquivo | Modo | Observabilidade | Testes | Uso Recomendado |
+|---------|------|----------------|--------|----------------|
+| `docker-compose.yml` | Leaderless | ✅ | Manual | Desenvolvimento/Demo |
+| `docker-compose-leaderless.yml` | Leaderless | ✅ | Manual | Teste específico leaderless |
+| `docker-compose-leader-follower.yml` | Leader-Follower | ✅ | Manual | Teste específico leader-follower |
+| `docker-compose-observability.yml` | Leader-Follower | ✅ | **🤖 Automático** | **CI/CD, Benchmarks** |
+| `docker-compose-observability-leaderless.yml` | Leaderless | ✅ | **🤖 Automático** | **Testes de Consistência** |
+
+### **Testes Automáticos**
+
+O arquivo `docker-compose-observability.yml` foi configurado para executar testes **automaticamente**:
+
+```bash
+# Testes básicos (carga) - execução automática
+docker-compose -f docker-compose-observability.yml up --build
+
+# Testes completos (carga + failover) - execução automática
+docker-compose -f docker-compose-observability.yml --profile extended-testing up --build
+```
+
+**Comportamento:**
+- 🚀 **K6 Load Test** executa automaticamente quando stack sobe
+- 📊 **Métricas** são coletadas em tempo real no Prometheus/Grafana
+- 🎯 **Failover Test** roda após load test (apenas com profile extended-testing)
+- ⚡ **Containers terminam** após completar os testes (restart: "no")
+
+### **Testes Manuais (outros docker-compose)**
+
+Para testes sob demanda nos outros modos:
+
+#### **Teste de Carga com K6**
 ```bash
 docker-compose --profile testing run --rm k6 run /scripts/load-test.js
 ```
 
-### **Teste de Failover**
+#### **Teste de Failover**
 ```bash
 docker-compose --profile testing run --rm k6 run /scripts/failover-test.js
 ```
+
+### **Interpretar Resultados dos Testes Automáticos**
+
+Após executar `docker-compose -f docker-compose-observability.yml up --build`, você verá:
+
+#### **1. Logs do K6 Load Test (Terminal)**
+```bash
+# Exemplo de saída esperada:
+k6-1  | ✓ PUT status is 200
+k6-1  | ✓ GET status is 200  
+k6-1  | ✓ PUT response time < 500ms
+k6-1  | ✓ GET response time < 200ms
+k6-1  | 
+k6-1  | === K6 Load Test Results ===
+k6-1  | Duration: 960000ms
+k6-1  | VUs: 100
+k6-1  | 
+k6-1  | Requests:
+k6-1  | - Total: 15847
+k6-1  | - Failed: 0.12%
+k6-1  | - RPS: 16.5
+k6-1  | 
+k6-1  | Latency:
+k6-1  | - Avg: 234ms
+k6-1  | - P95: 456ms
+k6-1  | - P99: 678ms
+k6-1  | 
+k6-1  | Consistency:
+k6-1  | - Read-your-writes violations: 0
+k6-1  | - Monotonic read violations: 2
+k6-1  | - Staleness P95: 1243ms
+k6-1  | - Convergence P95: 2156ms
+```
+
+#### **2. Métricas no Grafana (http://localhost:3000)**
+- 📊 **Request Rate**: Volume de requests por segundo
+- ⏱️ **Latency Distribution**: P50, P95, P99 em tempo real  
+- 🎯 **Success Rate**: Taxa de sucesso das operações
+- 🔄 **Consistency Metrics**: Violações de consistência detectadas
+
+#### **3. Container Status após Testes**
+```bash
+# Verificar status após conclusão
+docker-compose -f docker-compose-observability.yml ps
+
+# K6 containers devem mostrar "Exit 0" (sucesso)
+# Demais services devem estar "Up"
+```
+
+#### **4. Alertas no AlertManager (http://localhost:9094)**
+Se os testes detectarem problemas, alertas serão disparados automaticamente.
 
 ### **Teste Manual de Consistência**
 ```bash
@@ -161,7 +321,11 @@ curl http://localhost:9093/metrics  # Node 3
 │   ├── 📄 load-test.js                      # Teste de carga + consistência
 │   └── 📄 failover-test.js                  # Teste de failover
 │
-├── 📁 scripts/
+├── 📁 scripts/                 # Scripts essenciais (4 arquivos)
+│   ├── run-leader-follower.sh  # Executa modo leader-follower
+│   ├── run-leaderless.sh       # Executa modo leaderless  
+│   ├── compare-modes.sh        # Compara os dois modos
+│   └── clean-docker.sh         # Limpeza completa
 │   ├── 📄 run-complete-stack.sh             # Script principal interativo
 │   ├── 📄 test-consistency-checks.sh        # Testes manuais
 │   └── 📄 generate-test-report.sh           # Relatórios automáticos
@@ -527,78 +691,57 @@ kv-golang/
 - 🔄 Suporte a nós virtuais (vNodes)
 - ⚖️ Balanceamento automático de carga
 
-## 🧪 Scripts de Teste Automatizados
+## 🧪 Scripts Simplificados
 
-### Opções de Docker Compose
+### Scripts Disponíveis
 
-O sistema oferece três arquivos de configuração Docker:
+A pasta `scripts/` foi simplificada e contém apenas os scripts essenciais:
 
-1. **docker-compose.yml** - Modo leaderless (padrão)
-2. **docker-compose-leaderless.yml** - Modo leaderless (explícito)  
-3. **docker-compose-leader-follower.yml** - Modo leader-follower
+| Script | Descrição | Uso |
+|--------|-----------|-----|
+| `run-leader-follower.sh` | Executa modo Leader-Follower com observabilidade completa | `./scripts/run-leader-follower.sh` |
+| `run-leaderless.sh` | Executa modo Leaderless com observabilidade completa | `./scripts/run-leaderless.sh [consistency]` |
+| `compare-modes.sh` | Compara os dois modos lado a lado | `./scripts/compare-modes.sh` |
+| `clean-docker.sh` | Limpeza completa do ambiente Docker | `./scripts/clean-docker.sh` |
 
-#### ⚠️ Importante: Qual arquivo será usado?
+### Como Usar os Scripts
 
-Quando você executa `docker-compose up`, o Docker Compose **sempre usa o arquivo `docker-compose.yml` por padrão**. Para usar outros arquivos, você deve especificar explicitamente com a flag `-f`.
-
-#### Comandos para cada modo:
-
+#### 🚀 Executar Leader-Follower
 ```bash
-# Modo leaderless (padrão) - usa docker-compose.yml automaticamente
-docker-compose up --build -d
-
-# Modo leaderless (explícito) - especifica o arquivo
-docker-compose -f docker-compose-leaderless.yml up --build -d
-
-# Modo leader-follower - especifica o arquivo
-docker-compose -f docker-compose-leader-follower.yml up --build -d
-
-# Parar serviços (para qualquer arquivo)
-docker-compose down
-# ou especificar o arquivo usado:
-docker-compose -f docker-compose-leader-follower.yml down
+./scripts/run-leader-follower.sh
 ```
+- ✅ Inicia modo leader-follower
+- 📊 Observabilidade completa (Prometheus + Grafana + AlertManager)
+- 🧪 Testes K6 automáticos
+- 📁 Resultados salvos em `./test-results/`
 
-#### Verificar qual configuração será usada:
+#### 🔄 Executar Leaderless
 ```bash
-# Mostra a configuração que será aplicada
-docker-compose config
+# Testes básicos (load testing)
+./scripts/run-leaderless.sh
+
+# Testes completos (load + consistency)  
+./scripts/run-leaderless.sh consistency
 ```
+- ✅ Inicia modo leaderless
+- 📊 Observabilidade completa 
+- 🧪 Testes específicos para consistência eventual
+- 📁 Resultados salvos com sufixo `-leaderless`
 
-### Scripts de Teste por Plataforma
-
-#### Linux/macOS (Bash)
+#### ⚖️ Comparar Modos
 ```bash
-# Teste modo leaderless
-chmod +x scripts/test-leaderless.sh
-./scripts/test-leaderless.sh
-
-# Teste modo leader-follower
-chmod +x scripts/test-leader-follower.sh
-./scripts/test-leader-follower.sh
-
-# Comparação entre modos
-chmod +x scripts/compare-modes.sh
 ./scripts/compare-modes.sh
-
-# Testa compilação
-./test-build.sh
 ```
+- 🔄 Testa ambos os modos sequencialmente
+- 📊 Mostra tabela comparativa
+- ✅ Validação básica de funcionamento
 
-#### Windows (PowerShell)
-```powershell
-# Teste modo leaderless
-.\scripts\test-leaderless.ps1
-
-# Teste modo leader-follower
-.\scripts\test-leader-follower.ps1
+#### 🧹 Limpeza
+```bash
+./scripts/clean-docker.sh
 ```
-
-### Documentação de Testes
-
-Para instruções detalhadas de teste, consulte:
-- 📋 [Guia de Testes Completo](docs/testing-guide.md)
-
+- 🛑 Para todos os containers
+- 🗑️ Remove volumes e imagens órfãs
 ## ❓ **Perguntas Frequentes (FAQ)**
 
 ### **P: Como funciona a replicação no modo leader-follower?**

@@ -1,18 +1,18 @@
-# Docker Compose para modo LEADER-FOLLOWER com Observabilidade e Testes Automáticos
-# Para usar: docker-compose -f docker-compose-observability.yml up --build
+# Docker Compose para modo LEADERLESS com Observabilidade e Testes Automáticos
+# Para usar: docker-compose -f docker-compose-observability-leaderless.yml up --build
 
 services:
   # KV Store nodes
   node1:
     build: .
-    command: ["node1", "8081", "--mode=leader-follower"]
+    command: ["node1", "8081"]
     ports:
       - "8081:8081"
       - "9091:9091"  # Metrics
     networks:
       - kvnet
     environment:
-      - MODE=leader-follower
+      - MODE=leaderless
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
       interval: 30s
@@ -22,14 +22,14 @@ services:
 
   node2:
     build: .
-    command: ["node2", "8082", "--mode=leader-follower"]
+    command: ["node2", "8082"]
     ports:
       - "8082:8082"
       - "9092:9092"  # Metrics
     networks:
       - kvnet
     environment:
-      - MODE=leader-follower
+      - MODE=leaderless
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
       interval: 30s
@@ -39,14 +39,14 @@ services:
 
   node3:
     build: .
-    command: ["node3", "8083", "--mode=leader-follower"]
+    command: ["node3", "8083"]
     ports:
       - "8083:8083"
       - "9093:9093"  # Metrics
     networks:
       - kvnet
     environment:
-      - MODE=leader-follower
+      - MODE=leaderless
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8083/health"]
       interval: 30s
@@ -139,7 +139,7 @@ services:
       nginx:
         condition: service_healthy
     command: >
-      sh -c "sleep 30 && k6 run /scripts/load-test.js --out json=/results/load-test-results.json"
+      sh -c "sleep 30 && k6 run /scripts/load-test.js --out json=/results/load-test-results-leaderless.json"
     restart: "no"
 
   # K6 Failover Testing - Executa após load test
@@ -153,10 +153,26 @@ services:
     depends_on:
       - k6-load-test
     command: >
-      sh -c "sleep 10 && k6 run /scripts/failover-test.js --out json=/results/failover-test-results.json"
+      sh -c "sleep 10 && k6 run /scripts/failover-test.js --out json=/results/failover-test-results-leaderless.json"
     restart: "no"
     profiles:
       - extended-testing
+
+  # K6 Consistency Testing - Específico para modo leaderless
+  k6-consistency-test:
+    image: grafana/k6:latest
+    volumes:
+      - ./k6:/scripts
+      - ./test-results:/results
+    networks:
+      - kvnet
+    depends_on:
+      - k6-load-test
+    command: >
+      sh -c "sleep 15 && k6 run /scripts/consistency-test.js --out json=/results/consistency-test-results-leaderless.json"
+    restart: "no"
+    profiles:
+      - consistency-testing
 
 volumes:
   prometheus_data:
